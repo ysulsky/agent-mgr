@@ -1,20 +1,20 @@
-//! `am __debug ...`: hooks for the conformance suite. Not part of the CLI surface, and
-//! never needed by the live system. The Python implementation has the same commands in
-//! `src/am/_debug.py`, so `tests/impl.py` drives either one the same way.
+//! `am __debug ...`: test hooks for end-to-end tests. Not part of the CLI surface, and
+//! never needed by the live system.
 //!
 //! | Command | Does |
 //! |---|---|
-//! | `ping` | prints `ok` (the suite's smoke test) |
-//! | `tick` | one runner tick (`Runner().tick()`), then exits |
-//! | `ticker` | a runner that ticks once per line on stdin and answers `ok` per tick, keeping its in-memory state between ticks, as a Python `Runner` object does. Refuses to start if a daemon holds `daemon/lock`, but doesn't hold the lock itself: like an in-process Python `Runner`, it writes no `daemon/pid`, and a held lock with no pid makes `running_pid` fail. |
-//! | `scheduler-tick [SLUG [AT]]` | `scheduler.tick(cfg)`, or `_tick_project(SLUG, cfg, AT or now)` |
-//! | `render NAME [JSON]` | `prompts.render(NAME, **JSON)` |
-//! | `system-prompt SLUG AGENT` | `prompts.system_prompt(...)` |
-//! | `turn-prompt SLUG AGENT JSON` | `prompts.turn_prompt(...)` with the arguments in JSON |
-//! | `proc-shutdown DIR [REASON]` | `procs.shutdown(DIR, REASON)` |
-//! | `wake` | `core.wake_daemon()`: a CLI write's wake, with nothing written |
+//! | `ping` | prints `ok` (a smoke test) |
+//! | `tick` | one runner tick (`Runner::tick`), then exits |
+//! | `ticker` | a runner that ticks once per line on stdin and answers `ok` per tick, keeping its in-memory state between ticks, as the daemon's `Runner` does. Refuses to start if a daemon holds `daemon/lock`, but doesn't hold the lock itself: it writes no `daemon/pid`, and a held lock with no pid makes `running_pid` fail. |
+//! | `scheduler-tick [SLUG [AT]]` | `scheduler::tick`, or `scheduler::tick_project` for SLUG at AT (Unix seconds; default now) |
+//! | `render NAME [JSON]` | `prompts::render` of NAME with the values in JSON |
+//! | `system-prompt SLUG AGENT` | `prompts::system_prompt` for the agent |
+//! | `turn-prompt SLUG AGENT JSON` | `prompts::turn_prompt` with the arguments in JSON |
+//! | `proc-shutdown DIR [REASON]` | `procs::shutdown(DIR, REASON)` |
+//! | `wake` | `am_core::wake_daemon()`: a CLI write's wake, with nothing written |
 //!
-//! Owners: rust-lead for the framework; each command's body is the owning worker's.
+//! `ping` and `wake` are here; the others' bodies are in `am_turns::debug` and
+//! `am_ops::debug`, which have a few more.
 
 use std::ffi::OsString;
 

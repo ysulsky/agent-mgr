@@ -10,7 +10,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// `subprocess.CompletedProcess`, as bytes.
+/// A finished git command: its exit code and output, as bytes.
 #[derive(Debug, Clone)]
 pub struct Completed {
     pub code: i32,
@@ -19,7 +19,7 @@ pub struct Completed {
 }
 
 impl Completed {
-    /// `proc.stdout` with `text=True`: UTF-8 with universal newlines.
+    /// The output as text: UTF-8, with invalid bytes replaced and `\r\n` and `\r` read as `\n`.
     pub fn stdout_text(&self) -> String {
         text(&self.stdout)
     }
@@ -29,7 +29,7 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// Port of `gitstore.GitStore`.
+/// A git directory and the work tree it records.
 #[derive(Debug, Clone)]
 pub struct GitStore {
     pub git_dir: PathBuf,
@@ -41,8 +41,8 @@ impl GitStore {
         GitStore { git_dir, work_tree }
     }
 
-    /// Port of `GitStore.run`: git with no user or system config, its own identity, and
-    /// this store's directories. With `check`, a failure is `git <cmd> failed: <stderr>`.
+    /// Run git with no user or system config, its own identity, and this store's
+    /// directories. With `check`, a failure is `git <cmd> failed: <stderr>`.
     pub fn run(&self, args: &[&str], check: bool, author: Option<&str>) -> Result<Completed> {
         let name = author.filter(|a| !a.is_empty()).unwrap_or("am");
         let mut cmd = Command::new("git");
@@ -62,12 +62,11 @@ impl GitStore {
         let out = cmd.output()?;
         let done = Completed { code: out.status.code().unwrap_or(-1), stdout: out.stdout, stderr: out.stderr };
         if check && done.code != 0 {
-            return am_err(format!("git {} failed: {}", args.first().unwrap_or(&""), am_core::py::strip(&text(&done.stderr))));
+            return am_err(format!("git {} failed: {}", args.first().unwrap_or(&""), am_core::format::strip(&text(&done.stderr))));
         }
         Ok(done)
     }
 
-    /// Port of `GitStore.init`.
     pub fn init(&self) -> Result<()> {
         std::fs::create_dir_all(&self.work_tree)?;
         if util::exists(&self.git_dir.join("HEAD")) {
@@ -82,8 +81,8 @@ impl GitStore {
         Ok(())
     }
 
-    /// Port of `GitStore.commit`: commit changes under `paths`, relative to the work tree,
-    /// including deletions. Returns the new short revision, or None if nothing changed.
+    /// Commit changes under `paths`, relative to the work tree, including deletions.
+    /// Returns the new short revision, or None if nothing changed.
     pub fn commit(&self, paths: &[String], message: &str, author: Option<&str>) -> Result<Option<String>> {
         self.init()?;
         let _lock = locked(&self.git_dir)?;
@@ -99,10 +98,10 @@ impl GitStore {
         let commit = with_paths(&["commit", "--quiet", "-m", message]);
         self.run(&commit.iter().map(String::as_str).collect::<Vec<_>>(), true, author)?;
         let rev = self.run(&["rev-parse", "--short", "HEAD"], true, None)?;
-        Ok(Some(am_core::py::strip(&rev.stdout_text()).to_string()))
+        Ok(Some(am_core::format::strip(&rev.stdout_text()).to_string()))
     }
 
-    /// Port of `GitStore.log`: `{rev, ts, author, subject}`, newest first.
+    /// The history (of `path`, if given), as `{rev, ts, author, subject}`, newest first.
     pub fn log(&self, path: Option<&str>, limit: i64) -> Result<Vec<Value>> {
         self.init()?;
         let max = format!("--max-count={limit}");
@@ -112,11 +111,11 @@ impl GitStore {
         }
         let out = self.run(&args, false, None)?.stdout_text();
         let mut entries = Vec::new();
-        for line in am_core::py::splitlines(&out) {
+        for line in am_core::format::split_lines(&out) {
             let parts: Vec<&str> = line.splitn(4, '\t').collect();
             if parts.len() == 4 {
-                let Some(ts) = am_core::py::parse_int(parts[1]) else {
-                    return util::crash(format!("invalid literal for int() with base 10: {}", util::repr(parts[1])));
+                let Some(ts) = am_core::format::parse_int(parts[1]) else {
+                    return util::crash(format!("invalid literal for int() with base 10: {}", util::quote(parts[1])));
                 };
                 entries.push(json!({"rev": parts[0], "ts": ts, "author": parts[2], "subject": parts[3]}));
             }
@@ -124,10 +123,10 @@ impl GitStore {
         Ok(entries)
     }
 
-    /// Port of `GitStore.show`: a file's bytes at a revision, or None.
+    /// A file's bytes at a revision, or None.
     pub fn show(&self, rev: &str, path: &str) -> Result<Option<Vec<u8>>> {
         if rev.is_empty() || rev.starts_with('-') || !rev.chars().all(char::is_alphanumeric) {
-            return am_err(format!("invalid revision {}", util::repr(rev)));
+            return am_err(format!("invalid revision {}", util::quote(rev)));
         }
         self.init()?;
         let spec = format!("{rev}:{path}");

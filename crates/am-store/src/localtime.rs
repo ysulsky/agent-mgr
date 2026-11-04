@@ -1,11 +1,11 @@
-//! Local time as Python's `datetime` computes it: `datetime.fromtimestamp(t)` (through
-//! `localtime`), naive wall-clock arithmetic, and `naive.timestamp()` (Python's own
-//! `_mktime` search, so DST gaps and repeats resolve the same way, with `fold=0`).
+//! Local time: a timestamp to local wall-clock time (through `localtime`), naive
+//! wall-clock arithmetic, and back to a timestamp (see [`timestamp`] for how DST gaps and
+//! repeats resolve).
 //!
-//! A naive datetime is held as seconds since 1970-01-01 00:00 *as if it were UTC*, which
-//! makes `+ timedelta(minutes=1)` a plain `+ 60`.
+//! A naive time is held as seconds since 1970-01-01 00:00 *as if it were UTC*, which
+//! makes adding a minute a plain `+ 60`.
 
-/// A naive datetime's fields.
+/// A naive time's fields.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fields {
     pub year: i64,
@@ -52,13 +52,13 @@ pub fn fields(naive: i64) -> Fields {
     Fields { year, month, day, hour: secs / 3600, minute: secs / 60 % 60, second: secs % 60 }
 }
 
-/// `isoweekday() % 7`: Sunday is 0.
+/// The day of the week: Sunday is 0.
 pub fn weekday_sun0(naive: i64) -> u32 {
     // 1970-01-01 was a Thursday (4).
     ((naive.div_euclid(86400) + 4).rem_euclid(7)) as u32
 }
 
-/// `time.localtime(u)` as naive seconds.
+/// The local wall-clock time at timestamp `u`, as naive seconds.
 pub fn local(u: i64) -> i64 {
     let t = u as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
@@ -73,8 +73,9 @@ pub fn local(u: i64) -> i64 {
     })
 }
 
-/// `datetime.fromtimestamp(t)` to the whole second, as naive seconds (the microseconds
-/// round half-even, so .9999995 and up carries into the next second).
+/// The local time at a float timestamp, to the whole second, as naive seconds (the
+/// fraction rounds to whole microseconds, half to even, so .9999995 and up carries into
+/// the next second).
 pub fn from_timestamp(t: f64) -> i64 {
     let mut whole = t.trunc();
     let frac = t - whole;
@@ -87,7 +88,9 @@ pub fn from_timestamp(t: f64) -> i64 {
     local(whole as i64)
 }
 
-/// `naive.timestamp()` with `fold=0`: Python's `datetime._mktime`.
+/// Naive local seconds back to a timestamp. A time that occurs twice (when clocks go
+/// back) is its first occurrence; a time in a gap (when clocks go forward) is read with
+/// the offset from before the gap.
 pub fn timestamp(t: i64) -> i64 {
     const MAX_FOLD_SECONDS: i64 = 24 * 3600;
     let a = local(t) - t;
@@ -114,7 +117,7 @@ pub fn timestamp(t: i64) -> i64 {
     u1.max(u2)
 }
 
-/// `datetime.fromtimestamp(t).strftime(fmt)` for the directives the CLI uses:
+/// A timestamp formatted as local time, with the directives the CLI uses:
 /// `%Y %m %d %H %M %S %%`.
 pub fn strftime(t: f64, fmt: &str) -> String {
     let f = fields(from_timestamp(t));

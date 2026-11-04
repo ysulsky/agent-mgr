@@ -1,10 +1,10 @@
 //! Every call from the server into `am-turns` and `am-ops`, in one place, so a change to
-//! one of their signatures (they're still landing) touches only this file.
+//! one of their signatures touches only this file.
 
 use am_core::{Result, Value};
 use std::path::Path;
 
-/// `scheduler.HEALTH`.
+/// `scheduler::HEALTH`: the health check's entry in the schedule state.
 pub use am_turns::scheduler::HEALTH;
 
 // ---------------------------------------------------------------- turns
@@ -45,12 +45,12 @@ pub fn request_stop(slug: &str, name: &str) -> Result<()> {
     am_turns::runner::request_stop(slug, name)
 }
 
-/// `runner.turn_env(slug, name)`: the environment of a turn, in order.
+/// `runner::turn_env(slug, name)`: the environment of a turn, in order.
 pub fn turn_env(slug: &str, name: &str) -> Result<Vec<(String, String)>> {
     Ok(am_turns::runner::turn_env(slug, name, "").into_iter().collect())
 }
 
-/// `backends.read_events(backend, path, offset)`: the events, and the offset after them.
+/// `backends::read_events(backend, path, offset)`: the events, and the offset after them.
 pub fn read_events(backend: &str, path: &Path, offset: u64) -> Result<(Vec<Value>, u64)> {
     Ok(am_turns::backends::read_events(backend, path, offset, 2_000_000))
 }
@@ -128,8 +128,8 @@ pub fn connect_command(provider: &str) -> Result<Option<String>> {
     Ok(am_ops::storage::connect_command(provider))
 }
 
-/// `storage.connected(provider)`, then the remote it set up (`PROVIDERS[provider]["remote"]`,
-/// now in `[storage] rclone_remote`).
+/// `storage::connected(provider)`, then the remote it set up for that provider, read back
+/// from `[storage] rclone_remote`.
 pub fn connected(provider: &str) -> Result<String> {
     am_ops::storage::connected(provider)?;
     let cfg = am_core::config::load()?;

@@ -1,14 +1,47 @@
-//! argparse's `HelpFormatter` (Python 3.11): usage, with its wrapping, and the help page,
-//! for the parsers in `argparse.rs`.
+//! The usage text and the help page for the parsers in `args.rs`.
+//!
+//! Everything is laid out for a width: `$COLUMNS` if it's a positive integer, else the
+//! width of stdout's terminal, else 80; less 2. Widths count characters.
+//!
+//! # Usage
+//!
+//! `usage: PROG`, then the options in the order they were added, then the positionals.
+//! An option shows its first option string and its values (`--project PROJECT`), in
+//! brackets unless it's required; a flag shows just its option string. A value is shown
+//! as the argument's metavar, else `{a,b}` for choices, else its dest, upper-cased for an
+//! option; repeated by nargs as `X`, `[X]`, `[X ...]`, `X [X ...]` or `X ...` (`args.rs`).
+//!
+//! Usage wider than the width wraps by parts: a bracketed option, or a word. Parts fill
+//! each line up to the width; one wider than a line gets a line of its own.
+//!
+//! - When `usage: PROG` takes at most 3/4 of the width, the parts follow PROG on its line,
+//!   and the lines after it are indented to line up with the first part. Positionals start
+//!   a new line when there are options.
+//! - Otherwise PROG stands alone, and the parts follow on lines indented 7 spaces (under
+//!   PROG). If they need more than one line, the positionals start a new line.
+//!
+//! # The help page
+//!
+//! The usage, the description, then the sections `positional arguments:` and `options:`,
+//! each left out when empty, with single blank lines between. Text has its whitespace
+//! collapsed and is word-wrapped (`wrap.rs`): the description to the width, at least 11.
+//!
+//! A section lists each argument indented 2: a positional by its metavar, an option by
+//! each of its option strings with its values (`-f FILE, --file FILE`). Subcommands that
+//! have help are listed under their argument, indented 4. The help text goes in a column:
+//! 2 spaces past the widest entry (counting subcommands, all measured at indent 2), but at
+//! most 24, or the width less 20 if that's smaller (and at least 4). It's wrapped to the
+//! rest of the width (at least 11), with each further line indented to the column. An entry
+//! too wide to leave 2 spaces before the column has its help start on the next line.
 
-use crate::argparse::{Action, Kind, Nargs, Parser};
-use crate::textwrap;
+use crate::args::{Action, Kind, Nargs, Parser};
+use crate::wrap;
 
 fn clen(s: &str) -> usize {
     s.chars().count()
 }
 
-/// `shutil.get_terminal_size().columns - 2`: $COLUMNS, else stdout's terminal, else 80.
+/// The width to lay out for: $COLUMNS, else stdout's terminal, else 80; less 2.
 pub fn width() -> usize {
     let env = std::env::var("COLUMNS").ok().and_then(|c| c.trim().parse::<i64>().ok()).unwrap_or(0);
     let columns = if env > 0 {
@@ -21,7 +54,8 @@ pub fn width() -> usize {
     columns.saturating_sub(2)
 }
 
-/// `_metavar_formatter(action, default)(1)`.
+/// How an argument's value is shown: its metavar, else `{a,b}` for choices, else its dest
+/// (upper-cased for an option).
 fn metavar(a: &Action) -> String {
     if let Some(m) = &a.metavar {
         m.clone()
@@ -34,7 +68,7 @@ fn metavar(a: &Action) -> String {
     }
 }
 
-/// `_format_args`.
+/// An argument's values, by nargs.
 fn format_args(a: &Action) -> String {
     let m = metavar(a);
     match a.nargs {
@@ -47,7 +81,7 @@ fn format_args(a: &Action) -> String {
     }
 }
 
-/// `_format_action_invocation`.
+/// An argument as the help page lists it: `-f FILE, --file FILE`.
 fn invocation(a: &Action) -> String {
     if a.option_strings.is_empty() {
         metavar(a)
@@ -59,7 +93,8 @@ fn invocation(a: &Action) -> String {
     }
 }
 
-/// `_format_actions_usage` (no mutually exclusive groups).
+/// Usage for these arguments: those not required in brackets, with spaces just inside
+/// brackets and empty brackets removed.
 fn actions_usage(actions: &[&Action]) -> String {
     let parts: Vec<String> = actions
         .iter()
@@ -83,7 +118,8 @@ fn actions_usage(actions: &[&Action]) -> String {
     text.trim().to_string()
 }
 
-/// `re.findall(r'\(.*?\)+(?=\s|$)|\[.*?\]+(?=\s|$)|\S+', text)`.
+/// The parts usage wraps by, as `\(.*?\)+(?=\s|$)|\[.*?\]+(?=\s|$)|\S+` finds them: a
+/// bracketed group that ends a word, else a run of non-whitespace.
 fn usage_parts(text: &str) -> Vec<String> {
     let s: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
@@ -128,12 +164,12 @@ fn usage_parts(text: &str) -> Vec<String> {
 }
 
 impl Parser {
-    /// `format_usage()`: `usage: ...\n`.
+    /// The usage text alone: `usage: ...\n`.
     pub fn format_usage(&self) -> String {
         self.usage_text(width()).trim_end_matches('\n').to_string() + "\n"
     }
 
-    /// `_format_usage`, with its two trailing newlines.
+    /// The usage text for `width`, with two trailing newlines.
     fn usage_text(&self, width: usize) -> String {
         let prefix = "usage: ";
         let prog = self.prog.clone();
@@ -197,7 +233,7 @@ impl Parser {
         format!("{prefix}{usage}\n\n")
     }
 
-    /// `format_help()`.
+    /// The help page.
     pub fn format_help(&self) -> String {
         let width = width();
         let max_help_position = 24.min((width as isize - 20).max(4) as usize);
@@ -214,7 +250,7 @@ impl Parser {
         let mut out = self.usage_text(width);
         if let Some(d) = &self.description {
             let text = collapse(d);
-            out.push_str(&textwrap::fill(&text, width.max(11), ""));
+            out.push_str(&wrap::fill(&text, width.max(11), ""));
             out.push_str("\n\n");
         }
         for (title, positional) in [("positional arguments", true), ("options", false)] {
@@ -242,12 +278,12 @@ impl Parser {
     }
 }
 
-/// `_whitespace_matcher.sub(' ', text).strip()`.
+/// Runs of ASCII whitespace as one space, trimmed.
 fn collapse(text: &str) -> String {
     text.split(|c: char| c.is_ascii_whitespace()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
-/// `_format_action` for one line of the help page.
+/// One argument's entry on the help page: `header` at `indent`, its help at `help_position`.
 fn format_action(header: &str, help: Option<&str>, indent: usize, help_position: usize, width: usize) -> String {
     let help_width = (width as isize - help_position as isize).max(11) as usize;
     let action_width = help_position as isize - indent as isize - 2;
@@ -263,7 +299,7 @@ fn format_action(header: &str, help: Option<&str>, indent: usize, help_position:
     if let Some(h) = help {
         let text = collapse(h);
         if !text.is_empty() {
-            let lines = textwrap::wrap(&text, help_width);
+            let lines = wrap::wrap(&text, help_width);
             if let Some((first, rest)) = lines.split_first() {
                 out.push_str(&format!("{}{first}\n", " ".repeat(indent_first)));
                 for line in rest {

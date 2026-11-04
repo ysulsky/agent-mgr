@@ -6,7 +6,7 @@
 //! and `am health` are right after a restart. Output from the checks is never stored or
 //! logged, because it can hold account details: only a short detail picked out of it is.
 
-use am_core::{daemon_dir, hooks, now, poke, py, read_json, update_json, write_json, Result, Value, HOME_SLUG, MANAGER};
+use am_core::{daemon_dir, hooks, now, poke, format, read_json, update_json, write_json, Result, Value, HOME_SLUG, MANAGER};
 use am_store::{items, mail, projects};
 use regex::Regex;
 use serde_json::{json, Map};
@@ -26,7 +26,7 @@ pub const MISSING: &str = "missing";
 pub const UNKNOWN: &str = "unknown";
 pub const UNCHECKED: &str = "unchecked";
 
-/// `STATE_LABEL`.
+/// What a login state is shown as.
 pub fn state_label(state: &str) -> Option<&'static str> {
     Some(match state {
         OK => "OK",
@@ -59,7 +59,7 @@ fn hooked(key: &str) -> Option<Value> {
     hooks::get(key)
 }
 
-/// Port of `health.disk_percent`.
+/// How full the disk holding `AM_HOME` is, in percent.
 pub fn disk_percent() -> Result<f64> {
     if let Some(v) = hooked("disk_percent") {
         return Ok(v.as_f64().unwrap_or(0.0));
@@ -79,7 +79,7 @@ fn output_of(argv: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Port of `health.memory_percent`: memory in real use. Reclaimable caches don't count.
+/// Memory in real use, in percent. Reclaimable caches don't count.
 pub fn memory_percent() -> Result<Option<f64>> {
     if let Some(v) = hooked("memory_percent") {
         return Ok(v.as_f64());
@@ -98,7 +98,7 @@ pub fn memory_percent() -> Result<Option<f64>> {
             return Ok(Some((1.0 - available / total) * 100.0));
         }
     }
-    let Some(total) = output_of(&["sysctl", "-n", "hw.memsize"]).and_then(|t| py::strip(&t).parse::<f64>().ok()) else { return Ok(None) };
+    let Some(total) = output_of(&["sysctl", "-n", "hw.memsize"]).and_then(|t| format::strip(&t).parse::<f64>().ok()) else { return Ok(None) };
     let Some(text) = output_of(&["vm_stat"]) else { return Ok(None) };
     static PAGE: OnceLock<Regex> = OnceLock::new();
     static ROW: OnceLock<Regex> = OnceLock::new();
@@ -122,7 +122,7 @@ fn state_path() -> PathBuf {
     daemon_dir().join("health-state.json")
 }
 
-/// Port of `health.read_state`.
+/// The saved health state (daemon/health-state.json), or `{}`.
 pub fn read_state() -> Result<Value> {
     Ok(read_json(&state_path())?.unwrap_or_else(|| json!({})))
 }
@@ -139,7 +139,7 @@ fn update_state(change: impl FnOnce(&mut Map<String, Value>)) -> Result<()> {
 }
 
 fn loaded(cfg: Option<&Value>) -> Result<std::borrow::Cow<'_, Value>> {
-    Ok(match cfg.filter(|c| py::truthy(Some(c))) {
+    Ok(match cfg.filter(|c| format::truthy(Some(c))) {
         Some(cfg) => std::borrow::Cow::Borrowed(cfg),
         None => std::borrow::Cow::Owned(am_core::config::load()?),
     })
@@ -149,12 +149,13 @@ fn duration(v: &Value) -> Result<f64> {
     am_core::clock::parse_duration_value(v)
 }
 
-/// `f"{x:.0f}"`.
+/// `x` rounded to a whole number.
 fn fmt0(x: f64) -> String {
     format!("{x:.0}")
 }
 
-/// Port of `health.check_resources`.
+/// Read disk and memory use, save them, and alert the home manager about any over its
+/// limit (at most once per `alert_cooldown`).
 pub fn check_resources(cfg: Option<&Value>) -> Result<()> {
     let cfg = loaded(cfg)?;
     let health = &cfg["health"];
@@ -216,12 +217,12 @@ fn gh_account(output: &str) -> String {
     RE.get_or_init(|| Regex::new(r"Logged in to \S+ account ([A-Za-z0-9-]+)").unwrap()).captures(output).map(|c| c[1].to_string()).unwrap_or_default()
 }
 
-/// Port of `health.storage_login`: the name of the login check for a storage remote.
+/// The name of the login check for a storage remote.
 pub fn storage_login(remote: &str) -> Result<String> {
     Ok(if remote.to_lowercase().contains("drive") { "google-drive".into() } else { format!("rclone-{remote}") })
 }
 
-/// One login check (`login_checks`' dicts).
+/// One login check, as `login_checks` lists them.
 #[derive(Clone)]
 pub struct LoginCheck {
     pub name: String,
@@ -234,8 +235,13 @@ pub struct LoginCheck {
     pub missing_title: Option<String>,
 }
 
-/// `shlex.split(text)`: POSIX shell words, with quotes and backslashes.
-pub fn shlex_split(text: &str) -> Result<Vec<String>> {
+/// POSIX shell-style word splitting. Unquoted whitespace separates words. Single quotes
+/// keep everything up to the next `'` as it is. Inside double quotes a backslash escapes
+/// only `\`, `"`, `$`, `` ` `` and a newline, and is kept before anything else. Outside
+/// quotes a backslash takes the next character as it is. Quoted and unquoted parts next to
+/// each other make one word, so `''` is an empty word. An unclosed quote or a final
+/// backslash is an error.
+pub fn shell_words(text: &str) -> Result<Vec<String>> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut in_word = false;
@@ -298,13 +304,14 @@ pub fn shlex_split(text: &str) -> Result<Vec<String>> {
 fn opt_str(v: Option<&Value>) -> Option<String> {
     match v {
         None | Some(Value::Null) => None,
-        Some(v) => Some(py::str_value(v)),
+        Some(v) => Some(format::text(v)),
     }
 }
 
-/// Port of `health.login_checks`.
+/// The logins to check: Claude, Codex, and as configured GitHub, the storage remote and
+/// any extra ones.
 pub fn login_checks(cfg: &Value) -> Result<Vec<LoginCheck>> {
-    let bin = |name: &str| py::str_value(&cfg["backends"][name]["bin"]);
+    let bin = |name: &str| format::text(&cfg["backends"][name]["bin"]);
     let mut checks = vec![
         LoginCheck {
             name: "claude".into(),
@@ -328,7 +335,7 @@ pub fn login_checks(cfg: &Value) -> Result<Vec<LoginCheck>> {
         },
     ];
     let logins = &cfg["logins"];
-    if py::truthy(logins.get("gh")) {
+    if format::truthy(logins.get("gh")) {
         checks.push(LoginCheck {
             name: "gh".into(),
             title: "GitHub login expired".into(),
@@ -340,7 +347,7 @@ pub fn login_checks(cfg: &Value) -> Result<Vec<LoginCheck>> {
             missing_title: None,
         });
     }
-    let remote = cfg["storage"].get("rclone_remote").filter(|r| py::truthy(Some(r))).map(py::str_value).unwrap_or_default();
+    let remote = cfg["storage"].get("rclone_remote").filter(|r| format::truthy(Some(r))).map(format::text).unwrap_or_default();
     let remote = remote.trim_end_matches(':');
     if !remote.is_empty() {
         checks.push(LoginCheck {
@@ -354,12 +361,12 @@ pub fn login_checks(cfg: &Value) -> Result<Vec<LoginCheck>> {
             missing_title: Some("rclone is needed for storage offload".into()),
         });
     }
-    if let Some(extra) = logins.get("extra").filter(|e| py::truthy(Some(e))).and_then(Value::as_array) {
+    if let Some(extra) = logins.get("extra").filter(|e| format::truthy(Some(e))).and_then(Value::as_array) {
         for entry in extra {
-            let name = py::str_value(&entry["name"]);
+            let name = format::text(&entry["name"]);
             checks.push(LoginCheck {
                 title: format!("{name} login expired"),
-                check: shlex_split(&py::str_value(&entry["check"]))?,
+                check: shell_words(&format::text(&entry["check"]))?,
                 fix: opt_str(entry.get("fix")),
                 missing_fix: opt_str(entry.get("missing_fix")),
                 name,
@@ -387,8 +394,7 @@ fn result(state: &str, detail: String) -> (String, String) {
     (state.to_string(), detail)
 }
 
-/// Port of `health.probe_login`: run a check, and say what it found: a state, and a detail
-/// that's safe to show.
+/// Run a check, and say what it found: a state, and a detail that's safe to show.
 pub fn probe_login(check: &LoginCheck) -> (String, String) {
     let program = check.check.first().cloned().unwrap_or_default();
     let tool = program.rsplit('/').next().unwrap_or("").to_string();
@@ -430,7 +436,7 @@ pub fn probe_login(check: &LoginCheck) -> (String, String) {
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return result(UNKNOWN, format!("The check didn't finish within {}s.", py::str_value(&hooked("login_timeout").unwrap_or(json!(45)))));
+                return result(UNKNOWN, format!("The check didn't finish within {}s.", format::text(&hooked("login_timeout").unwrap_or(json!(45)))));
             }
         }
     };
@@ -454,12 +460,12 @@ pub fn probe_login(check: &LoginCheck) -> (String, String) {
 fn record_login(name: &str, state: &str, detail: &str) -> Result<()> {
     update_state(|s| {
         let logins = s.entry("logins").or_insert_with(|| json!({}));
-        let before = logins.get(name).filter(|b| py::truthy(Some(b))).cloned().unwrap_or_else(|| json!({}));
+        let before = logins.get(name).filter(|b| format::truthy(Some(b))).cloned().unwrap_or_else(|| json!({}));
         let mut entry = json!({"state": state, "detail": detail, "checked": now()});
         if state == UNKNOWN {
             // Not knowing now doesn't undo what the last answer was.
             let known = if before.get("state").and_then(Value::as_str) == Some(UNKNOWN) { before.get("last_known") } else { before.get("state") };
-            if let Some(known) = known.filter(|k| py::truthy(Some(k))) {
+            if let Some(known) = known.filter(|k| format::truthy(Some(k))) {
                 entry["last_known"] = known.clone();
             }
         }
@@ -467,7 +473,7 @@ fn record_login(name: &str, state: &str, detail: &str) -> Result<()> {
     })
 }
 
-/// Port of `health.mark_checking`: show these logins as being checked, or all of them.
+/// Show these logins as being checked, or all of them.
 pub fn mark_checking(names: Option<&[String]>, cfg: &Value) -> Result<()> {
     let chosen: Vec<String> = login_checks(cfg)?.into_iter().map(|c| c.name).filter(|n| names.is_none_or(|names| names.contains(n))).collect();
     update_state(|s| {
@@ -519,8 +525,8 @@ fn check_login(check: &LoginCheck, fixed: bool) -> Result<()> {
     Ok(())
 }
 
-/// Port of `health.check_logins`: check these logins, or all of them, together, so that one
-/// that hangs doesn't hold up the rest. `fixed` are ones the user just ran a fix for.
+/// Check these logins, or all of them, together, so that one that hangs doesn't hold up the
+/// rest. `fixed` are ones the user just ran a fix for.
 pub fn check_logins(cfg: Option<&Value>, names: Option<&[String]>, fixed: Option<&[String]>) -> Result<()> {
     let cfg = loaded(cfg)?;
     let fixed: BTreeSet<String> = fixed.unwrap_or(&[]).iter().cloned().collect();
@@ -563,14 +569,14 @@ fn forget_removed_logins(current: &BTreeSet<String>) -> Result<()> {
 
 // ---------------------------------------------------------------- logins that turns found expired
 
-/// Port of `health.item_login`: which login an attention item is about, if it's one of the
-/// two kinds that are: a check's, keyed by the login, and a turn's, keyed by the agent.
+/// Which login an attention item is about, if it's one of the two kinds that are: a
+/// check's, keyed by the login, and a turn's, keyed by the agent.
 pub fn item_login(item: &Value) -> Result<Option<String>> {
-    let key = item.get("key").filter(|k| py::truthy(Some(k))).map(py::str_value).unwrap_or_default();
+    let key = item.get("key").filter(|k| format::truthy(Some(k))).map(format::text).unwrap_or_default();
     let Some(rest) = key.strip_prefix("login-") else { return Ok(None) };
     let source = item.get("source").and_then(Value::as_str);
     if source == Some("runner") {
-        let title = item.get("title").filter(|t| py::truthy(Some(t))).map(py::str_value).unwrap_or_default();
+        let title = item.get("title").filter(|t| format::truthy(Some(t))).map(format::text).unwrap_or_default();
         return Ok(turn_login_title().captures(&title).map(|c| c[1].to_string()));
     }
     Ok((source == Some("health")).then(|| rest.to_string()))
@@ -582,13 +588,13 @@ pub fn item_login(item: &Value) -> Result<Option<String>> {
 fn turn_reports(attention: &[(String, Vec<Value>)]) -> Result<BTreeMap<String, Vec<Value>>> {
     let mut reports: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for (slug, entries) in attention {
-        if py::truthy(projects::get_project(slug)?.get("archived_at")) {
+        if format::truthy(projects::get_project(slug)?.get("archived_at")) {
             continue;
         }
         for item in entries {
             if let Some(login) = item_login(item)? {
                 if item.get("source").and_then(Value::as_str) == Some("runner") {
-                    let key = py::str_value(&item["key"]);
+                    let key = format::text(&item["key"]);
                     let agent = key.strip_prefix("login-").unwrap_or(&key).to_string();
                     reports.entry(login).or_default().push(json!({"project": slug, "agent": agent, "at": item.get("created").cloned().unwrap_or(Value::Null)}));
                 }
@@ -604,8 +610,8 @@ fn clear_turn_reports(name: &str) -> Result<()> {
     for slug in projects::list_slugs()? {
         for item in items::list_attention(&slug, false)? {
             if item.get("source").and_then(Value::as_str) == Some("runner") && item_login(&item)?.as_deref() == Some(name) {
-                items::resolve_attention(&slug, &py::str_value(&item["id"]), "health")?;
-                let key = py::str_value(&item["key"]);
+                items::resolve_attention(&slug, &format::text(&item["id"]), "health")?;
+                let key = format::text(&item["key"]);
                 let agent = key.strip_prefix("login-").unwrap_or(&key);
                 if projects::agent_exists(&slug, agent) {
                     projects::update_agent(&slug, agent, |a| {
@@ -621,13 +627,13 @@ fn clear_turn_reports(name: &str) -> Result<()> {
 // ---------------------------------------------------------------- what the Health page and `am health` show
 
 fn login_row(check: &LoginCheck, entry: &Value, reports: &[Value]) -> Value {
-    let text = |key: &str| entry.get(key).filter(|v| py::truthy(Some(v))).map(py::str_value);
+    let text = |key: &str| entry.get(key).filter(|v| format::truthy(Some(v))).map(format::text);
     let mut state = text("state").unwrap_or_else(|| UNCHECKED.into());
     let mut detail = text("detail").unwrap_or_default();
     let last_known = entry.get("last_known").cloned().unwrap_or(Value::Null);
     let last_known_text = last_known.as_str().map(String::from);
     if !reports.is_empty() {
-        let mut who = reports.iter().take(3).map(|r| format!("{} in {}", py::str_value(&r["agent"]), py::str_value(&r["project"]))).collect::<Vec<_>>().join(", ");
+        let mut who = reports.iter().take(3).map(|r| format!("{} in {}", format::text(&r["agent"]), format::text(&r["project"]))).collect::<Vec<_>>().join(", ");
         if reports.len() > 3 {
             who.push_str(" and others");
         }
@@ -639,8 +645,8 @@ fn login_row(check: &LoginCheck, entry: &Value, reports: &[Value]) -> Value {
             state = EXPIRED.into();
         }
     }
-    if state == UNKNOWN && py::truthy(Some(&last_known)) {
-        let known = last_known_text.clone().unwrap_or_else(|| py::str_value(&last_known));
+    if state == UNKNOWN && format::truthy(Some(&last_known)) {
+        let known = last_known_text.clone().unwrap_or_else(|| format::text(&last_known));
         detail = format!("{detail} Last known: {}.", state_label(&known).map(String::from).unwrap_or(known));
     }
     let mut fix = None;
@@ -658,7 +664,7 @@ fn login_row(check: &LoginCheck, entry: &Value, reports: &[Value]) -> Value {
         "name": check.name,
         "state": state,
         "label": state_label(&state).unwrap_or(""),
-        "detail": py::strip(&detail),
+        "detail": format::strip(&detail),
         "checked": entry.get("checked").cloned().unwrap_or(Value::Null),
         "checking": since.is_some_and(|since| now() - since < checking_for),
         "fix": fix,
@@ -670,7 +676,7 @@ fn login_row(check: &LoginCheck, entry: &Value, reports: &[Value]) -> Value {
 fn machine_rows(cfg: &Value, state: &Value) -> Vec<Value> {
     let mut rows = Vec::new();
     for (name, label, limit) in [("disk", "Disk", &cfg["health"]["disk_warn_percent"]), ("memory", "Memory", &cfg["health"]["memory_warn_percent"])] {
-        let reading = state.get("resources").and_then(|r| r.get(name)).filter(|r| py::truthy(Some(r))).cloned().unwrap_or_else(|| json!({}));
+        let reading = state.get("resources").and_then(|r| r.get(name)).filter(|r| format::truthy(Some(r))).cloned().unwrap_or_else(|| json!({}));
         let percent = reading.get("percent").cloned().unwrap_or(Value::Null);
         let high = percent.as_f64().is_some_and(|p| limit.as_f64().is_some_and(|l| p >= l));
         rows.push(json!({
@@ -692,7 +698,7 @@ fn project_rows(cfg: &Value, attention: &[(String, Vec<Value>)]) -> Result<Vec<V
         let stuck = format!("stuck-{MANAGER}");
         let problem = if entries.iter().any(|i| i.get("key").and_then(Value::as_str) == Some(stuck.as_str())) {
             json!("The manager may be stuck")
-        } else if matches!(row.get("check").filter(|c| py::truthy(Some(c))).and_then(|c| c.get("state")).and_then(Value::as_str), Some("failed" | "vanished" | "abandoned")) {
+        } else if matches!(row.get("check").filter(|c| format::truthy(Some(c))).and_then(|c| c.get("state")).and_then(Value::as_str), Some("failed" | "vanished" | "abandoned")) {
             json!("The last check's turn failed")
         } else {
             Value::Null
@@ -705,7 +711,7 @@ fn project_rows(cfg: &Value, attention: &[(String, Vec<Value>)]) -> Result<Vec<V
 
 fn summary(logins: &[Value], machine: &[Value], project_rows: &[Value]) -> Value {
     let state = |l: &Value| l["state"].as_str().unwrap_or("").to_string();
-    let name = |l: &Value| py::str_value(&l["name"]);
+    let name = |l: &Value| format::text(&l["name"]);
     let bad: Vec<String> = logins
         .iter()
         .filter(|l| state(l) == EXPIRED || state(l) == MISSING)
@@ -714,10 +720,10 @@ fn summary(logins: &[Value], machine: &[Value], project_rows: &[Value]) -> Value
     let mut warnings: Vec<String> = logins.iter().filter(|l| state(l) == UNKNOWN).map(|l| format!("{} login unknown", name(l))).collect();
     let unchecked = logins.iter().any(|l| state(l) == UNCHECKED);
     for row in machine.iter().filter(|r| r["high"] == true) {
-        warnings.push(format!("{} at {}%", py::str_value(&row["label"]), fmt0(row["percent"].as_f64().unwrap_or(0.0))));
+        warnings.push(format!("{} at {}%", format::text(&row["label"]), fmt0(row["percent"].as_f64().unwrap_or(0.0))));
     }
-    for row in project_rows.iter().filter(|r| py::truthy(r.get("problem")) && !py::truthy(r.get("archived"))) {
-        warnings.push(format!("{}: {}", py::str_value(&row["name"]), py::str_value(&row["problem"])));
+    for row in project_rows.iter().filter(|r| format::truthy(r.get("problem")) && !format::truthy(r.get("archived"))) {
+        warnings.push(format!("{}: {}", format::text(&row["name"]), format::text(&row["problem"])));
     }
     let (level, messages, label) = if !bad.is_empty() {
         let label = if bad.len() == 1 { bad[0].clone() } else { format!("{} logins need fixing", bad.len()) };
@@ -733,8 +739,7 @@ fn summary(logins: &[Value], machine: &[Value], project_rows: &[Value]) -> Value
     json!({"level": level, "label": label, "messages": messages})
 }
 
-/// Port of `health.snapshot`: everything the Health page shows. Reads files only: nothing
-/// here runs a check.
+/// Everything the Health page shows. Reads files only: nothing here runs a check.
 pub fn snapshot(cfg: Option<&Value>) -> Result<Value> {
     let cfg = loaded(cfg)?;
     let state = read_state()?;
@@ -749,7 +754,7 @@ pub fn snapshot(cfg: Option<&Value>) -> Result<Value> {
     let logins: Vec<Value> = login_checks(&cfg)?
         .iter()
         .map(|c| {
-            let entry = stored.get(&c.name).filter(|e| py::truthy(Some(e))).unwrap_or(&empty);
+            let entry = stored.get(&c.name).filter(|e| format::truthy(Some(e))).unwrap_or(&empty);
             login_row(c, entry, reports.get(&c.name).map(Vec::as_slice).unwrap_or(&[]))
         })
         .collect();
@@ -764,7 +769,7 @@ pub fn snapshot(cfg: Option<&Value>) -> Result<Value> {
         "check_every": {"logins": cfg["health"]["login_check_every"], "machine": cfg["health"]["check_every"]},
     }))
     .map(|mut v| {
-        // Python's key order: summary, logins, machine, projects, checking, check_every.
+        // Key order: summary, logins, machine, projects, checking, check_every.
         let map = v.as_object_mut().unwrap();
         let checking = map.shift_remove("checking").unwrap();
         let check_every = map.shift_remove("check_every").unwrap();
@@ -774,9 +779,8 @@ pub fn snapshot(cfg: Option<&Value>) -> Result<Value> {
     })
 }
 
-/// Port of `health.fix_for`: whether there's a login with this name, and the one command
-/// Fix may run for it right now, if any. The command comes from config and this module,
-/// never from a request.
+/// Whether there's a login with this name, and the one command Fix may run for it right
+/// now, if any. The command comes from config and this module, never from a request.
 pub fn fix_for(name: &str, cfg: Option<&Value>) -> Result<(bool, Option<String>)> {
     let cfg = loaded(cfg)?;
     for row in snapshot(Some(&cfg))?["logins"].as_array().cloned().unwrap_or_default() {
@@ -792,10 +796,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shlex_splits_as_python_does() {
-        assert_eq!(shlex_split(r#"test -f "/a b/c" 'd e' f\ g"#).unwrap(), vec!["test", "-f", "/a b/c", "d e", "f g"]);
-        assert_eq!(shlex_split("sleep 40").unwrap(), vec!["sleep", "40"]);
-        assert!(shlex_split("'open").is_err());
+    fn shell_words_split_with_quotes() {
+        assert_eq!(shell_words(r#"test -f "/a b/c" 'd e' f\ g"#).unwrap(), vec!["test", "-f", "/a b/c", "d e", "f g"]);
+        assert_eq!(shell_words("sleep 40").unwrap(), vec!["sleep", "40"]);
+        assert!(shell_words("'open").is_err());
     }
 
     #[test]

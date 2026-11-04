@@ -1,10 +1,10 @@
 //! The web server: UI, JSON API, live events, terminals and artifact serving.
 //!
-//! axum serves the connections, and one fallback handler does the rest, as aiohttp would:
-//! the routes (`create_app`'s table, matched against yarl's `path_safe`, with aiohttp's
-//! 404 and 405), then the `security` middleware, then the handler.
+//! axum serves the connections, and one fallback handler does the rest: the routes (the
+//! `ROUTES` table, matched against `path_safe`, with a 404 for an unknown path and a 405
+//! for a method the path doesn't take), then the `security` middleware, then the handler.
 //!
-//! - `http`: requests, responses, raised errors, path decoding, `FileResponse`.
+//! - `http`: requests, responses, HTTP errors, path decoding, file responses.
 //! - `auth`: the cookie, capability tokens, the host and origin checks.
 //! - `files`: the app's pages and static files, artifacts, attachments.
 //! - `api`: the JSON API.
@@ -33,7 +33,7 @@ pub const APP_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'sel
 font-src 'self' data:; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'; \
 form-action 'self'; frame-ancestors 'self'";
 
-/// What every handler can reach (aiohttp's `request.app`).
+/// What every handler can reach.
 pub struct App {
     pub daemon: Arc<Daemon>,
     pub hub: Arc<events::Hub>,
@@ -87,7 +87,7 @@ pub enum Route {
     MemoryRemove,
 }
 
-/// `create_app`'s routes, in its order. A GET also answers HEAD, as `add_get` does.
+/// The routes, in the order they're tried. A GET route also answers HEAD.
 const ROUTES: &[(&str, &str, Route)] = &[
     ("GET", "/", Route::Index),
     ("GET", "/memory", Route::Index),
@@ -145,7 +145,7 @@ struct Compiled {
     route: Route,
 }
 
-/// A pattern as aiohttp compiles it: `{name}` is `[^{}/]+`, `{name:re}` is `re`.
+/// A route pattern as a regex: `{name}` is `[^{}/]+`, `{name:re}` is `re`.
 fn compile(pattern: &'static str) -> (Option<Regex>, Vec<String>) {
     if !pattern.contains('{') {
         return (None, vec![]);
@@ -186,8 +186,8 @@ pub enum Resolved {
     NotFound,
 }
 
-/// `UrlDispatcher.resolve`: the first route whose path and method match; else 405 with
-/// every method allowed for the path, or 404.
+/// The first route whose path and method match; else 405 with every method allowed for
+/// the path, or 404.
 pub fn resolve(method: &str, path_safe: &str) -> Resolved {
     let mut allowed: Vec<String> = Vec::new();
     for compiled in routes() {
@@ -357,8 +357,8 @@ pub struct Server {
 }
 
 impl Server {
-    /// `web_runner.cleanup()` with `shutdown_timeout=1`: no new connections, a second for
-    /// the requests in flight, then the rest (event streams, terminals) are dropped.
+    /// Stop: no new connections, a second for the requests in flight, then the rest
+    /// (event streams, terminals) are dropped.
     pub async fn shutdown(self) {
         let _ = self.stop.send(true);
         let mut task = self.task;
@@ -369,7 +369,7 @@ impl Server {
     }
 }
 
-/// Port of `web.start_server`: listen on `[web] host` and `port` (0 for any free one).
+/// Listen on `[web] host` and `port` (0 for any free one).
 pub async fn start_server(daemon: Arc<Daemon>) -> Result<Server> {
     let cfg = daemon.cfg.clone();
     let host = cfg["web"]["host"].as_str().unwrap_or("127.0.0.1").to_string();
@@ -414,10 +414,10 @@ mod tests {
     }
 
     #[test]
-    fn routes_match_as_aiohttp_matches_them() {
+    fn routes_match_paths_and_methods() {
         assert_eq!(found("GET", "/").unwrap().0, Route::Index);
         assert_eq!(found("HEAD", "/static/app.js").unwrap().1, vec![("path".into(), "app.js".into())]);
-        assert_eq!(found("GET", "/static/%2e%2e/web.py").unwrap().1, vec![("path".into(), "../web.py".into())]);
+        assert_eq!(found("GET", "/static/%2e%2e/config.toml").unwrap().1, vec![("path".into(), "../config.toml".into())]);
         assert_eq!(found("GET", "/p/").unwrap().0, Route::Index);
         let (route, params) = found("POST", "/api/projects/demo/attention/..%2F..%2Fother%2Fproject/resolve").unwrap();
         assert_eq!(route, Route::AttentionResolve);

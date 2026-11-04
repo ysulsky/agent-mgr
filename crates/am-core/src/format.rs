@@ -1,7 +1,34 @@
-//! Python semantics that output depends on: truthiness, str(), repr() of a float or a
-//! plain string, `:.2f`, and str.split()/strip() whitespace. (From branch `rust-am`.)
-//! `str_of` and `repr_str` return an error where Python's output isn't reproduced yet
-//! (containers, non-ASCII repr): extend them rather than working around them.
+//! How values become text in messages, prompts and command output.
+//!
+//! - Truthiness (`truthy`): a missing value, null, `false`, zero, the empty string, and an
+//!   empty array or object are false; anything else is true.
+//! - A value as text (`text`, `text_of`): a string as it is, anything else in its literal
+//!   form. A missing value prints `None`, as null does.
+//! - The literal form (`literal`): a string quoted (see `quote` below), null as `None`,
+//!   booleans as `True` and `False`, an integer in decimal, a float as its float text, an
+//!   array as `[1, 'a']` and an object as `{'k': 1, 'l': None}`: items separated by `, `,
+//!   each key quoted and followed by `: `, in the object's order.
+//! - Float text (`float_text`): the shortest digits that read back as the same float. Fixed
+//!   notation for 1e-4 <= |x| < 1e16, always with a digit after the point (`1.0`, `0.0001`,
+//!   `123.456`); otherwise exponent notation with a sign and at least two exponent digits
+//!   (`1e+16`, `1e-05`, `1.5e-07`). Non-finite floats are `nan`, `inf` and `-inf`.
+//! - Quoting (`quote`): single quotes, or double quotes if the text has a `'` and no `"`.
+//!   A backslash escapes the chosen quote and `\`; newline, carriage return and tab are
+//!   written as `\n`, `\r` and `\t`; any other character that isn't printable
+//!   (`is_printable`) is `\xNN` below U+0100, `\uNNNN` below U+10000 and `\UNNNNNNNN`
+//!   above, in lowercase hex. Everything else, non-ASCII included, is kept as it is.
+//! - `fmt_2f`: a number with two digits after the point; a boolean as `0.00` or `1.00`.
+//! - Whitespace (`is_space`, `strip`): Unicode whitespace and the separators \x1c-\x1f.
+//!   `strip` trims it from both ends.
+//! - `parse_int`: an optional `+` or `-` and ASCII digits, with optional whitespace around
+//!   them and single underscores allowed between digits. Anything else, or a number too big
+//!   for 64 bits, is not an integer.
+//! - `split_lines`: the lines of a text without their line ends. A line ends at `\n`,
+//!   `\r\n`, `\r`, `\v`, `\f`, \x1c, \x1d, \x1e, U+0085, U+2028 or U+2029. A final line end
+//!   doesn't make an empty last line, and empty text has no lines.
+//!
+//! `text_of` and `try_quote` return a `Result` but always succeed; `fmt_2f` and
+//! `excerpt_of` fail for values they have no text for.
 
 use crate::{Error, Result as R};
 use serde_json::Value;
@@ -17,43 +44,44 @@ pub fn truthy(v: Option<&Value>) -> bool {
     }
 }
 
-/// `str(value)`, as an f-string prints it: a string as it is, anything else as its repr.
-pub fn str_of(v: Option<&Value>) -> R<String> {
+/// A value as text: a string as it is, anything else in its literal form, and a missing
+/// value as `None`.
+pub fn text_of(v: Option<&Value>) -> R<String> {
     Ok(match v {
         Some(Value::String(s)) => s.clone(),
         None => "None".into(),
-        Some(v) => repr_value(v),
+        Some(v) => literal(v),
     })
 }
 
-/// `str(value)` for a value that's there.
-pub fn str_value(v: &Value) -> String {
+/// A value that's there as text: a string as it is, anything else in its literal form.
+pub fn text(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
-        v => repr_value(v),
+        v => literal(v),
     }
 }
 
-/// `repr(value)` of what `json.load` gives: dicts, lists, str, int, float, bool, None.
-pub fn repr_value(v: &Value) -> String {
+/// The literal form of any JSON value: objects, arrays, strings, numbers, booleans, null.
+pub fn literal(v: &Value) -> String {
     let mut out = String::new();
-    repr_into(v, &mut out);
+    literal_into(v, &mut out);
     out
 }
 
-fn repr_into(v: &Value, out: &mut String) {
+fn literal_into(v: &Value, out: &mut String) {
     match v {
         Value::Null => out.push_str("None"),
         Value::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
-        Value::Number(n) => out.push_str(&number_str(n)),
-        Value::String(s) => out.push_str(&repr(s)),
+        Value::Number(n) => out.push_str(&number_text(n)),
+        Value::String(s) => out.push_str(&quote(s)),
         Value::Array(items) => {
             out.push('[');
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                repr_into(item, out);
+                literal_into(item, out);
             }
             out.push(']');
         }
@@ -63,28 +91,28 @@ fn repr_into(v: &Value, out: &mut String) {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(&repr(k));
+                out.push_str(&quote(k));
                 out.push_str(": ");
-                repr_into(item, out);
+                literal_into(item, out);
             }
             out.push('}');
         }
     }
 }
 
-/// A JSON number as Python's `str()` prints it: ints as ints, floats as `repr(float)`.
-pub fn number_str(n: &serde_json::Number) -> String {
+/// A JSON number as text: integers as integers, floats as `float_text`.
+pub fn number_text(n: &serde_json::Number) -> String {
     if let Some(i) = n.as_i64() {
         i.to_string()
     } else if let Some(u) = n.as_u64() {
         u.to_string()
     } else {
-        float_repr(n.as_f64().unwrap_or(f64::NAN))
+        float_text(n.as_f64().unwrap_or(f64::NAN))
     }
 }
 
-/// `repr(float)`: the shortest round-trip digits, fixed notation for 1e-4 <= |x| < 1e16.
-pub fn float_repr(x: f64) -> String {
+/// A float as text: the shortest round-trip digits, fixed notation for 1e-4 <= |x| < 1e16.
+pub fn float_text(x: f64) -> String {
     if !x.is_finite() {
         return (if x.is_nan() { "nan" } else if x > 0.0 { "inf" } else { "-inf" }).into();
     }
@@ -109,26 +137,25 @@ pub fn float_repr(x: f64) -> String {
     format!("{sign}{body}")
 }
 
-/// `format(value, ".2f")` for a JSON number (bools are ints in Python).
+/// A JSON number with two digits after the point. A boolean counts as 0 or 1.
 pub fn fmt_2f(v: Option<&Value>) -> R<String> {
     let f = match v {
         Some(Value::Number(n)) => n.as_f64().ok_or_else(|| Error::Other("not a float".into()))?,
         Some(Value::Bool(b)) => *b as i64 as f64,
-        _ => return Err(Error::Other("not representable as Python would print it".into())),
+        _ => return Err(Error::Other("not representable as text".into())),
     };
     Ok(format!("{:.2}", f))
 }
 
-/// `repr(str)`, as `f"{x!r}"` prints it. Always succeeds; kept fallible for its callers.
-pub fn repr_str(s: &str) -> R<String> {
-    Ok(repr(s))
+/// `quote`, kept fallible for its callers. Always succeeds.
+pub fn try_quote(s: &str) -> R<String> {
+    Ok(quote(s))
 }
 
-/// `repr(str)`: single quotes unless the text has a `'` and no `"`; backslash escapes for
-/// the quote, `\\`, `\n`, `\r`, `\t`; `\xNN`, `\uNNNN` or `\UNNNNNNNN` for anything
-/// `str.isprintable()` rejects. (Unassigned code points, which Python also escapes,
-/// are kept: that needs the Unicode tables.)
-pub fn repr(s: &str) -> String {
+/// A string quoted for messages: single quotes unless the text has a `'` and no `"`;
+/// backslash escapes for the quote, `\\`, `\n`, `\r`, `\t`; `\xNN`, `\uNNNN` or
+/// `\UNNNNNNNN` for anything `is_printable` rejects.
+pub fn quote(s: &str) -> String {
     let q = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
     let mut out = String::with_capacity(s.len() + 2);
     out.push(q);
@@ -159,8 +186,10 @@ pub fn repr(s: &str) -> String {
     out
 }
 
-/// `str.isprintable()` for one character: false for control and format characters,
-/// separators other than the space, private use, and noncharacters.
+/// Whether `quote` keeps a character as it is: false for control and format characters,
+/// separators other than the space, surrogates, private use, and noncharacters.
+/// (Unassigned code points count as printable: telling them apart needs the Unicode
+/// tables.)
 pub fn is_printable(c: char) -> bool {
     let n = c as u32;
     !(n < 0x20
@@ -194,7 +223,7 @@ pub fn is_printable(c: char) -> bool {
         || n >= 0xf0000)
 }
 
-/// Python's `str.isspace`, which also counts the separators \x1c-\x1f.
+/// Whitespace: Unicode whitespace, and also the separators \x1c-\x1f.
 pub fn is_space(c: char) -> bool {
     c.is_whitespace() || ('\x1c'..='\x1f').contains(&c)
 }
@@ -203,18 +232,19 @@ pub fn strip(s: &str) -> &str {
     s.trim_matches(is_space)
 }
 
-/// `excerpt(value or "")` where the value came from JSON.
+/// An excerpt of a JSON value: empty for a falsy value, `text::excerpt` of a string, and
+/// an error for anything else.
 pub fn excerpt_of(v: Option<&Value>, limit: usize) -> R<String> {
     match v {
         _ if !truthy(v) => Ok(String::new()),
         Some(Value::String(s)) => Ok(crate::text::excerpt(s, limit)),
-        _ => Err(Error::Other("not representable as Python would print it".into())),
+        _ => Err(Error::Other("not representable as text".into())),
     }
 }
 
 
-/// `int(text)` for a `str`: surrounding whitespace, a sign, and digits with single
-/// underscores between them. (Non-ASCII digits, which Python also accepts, are refused.)
+/// Text as an integer: surrounding whitespace, a sign, and ASCII digits with single
+/// underscores between them. (Non-ASCII digits are refused.)
 pub fn parse_int(text: &str) -> Option<i64> {
     let t = strip(text);
     let (neg, digits) = match t.as_bytes().first() {
@@ -232,9 +262,9 @@ pub fn parse_int(text: &str) -> Option<i64> {
     Some(if neg { -n } else { n })
 }
 
-/// `str.splitlines()`: splits on \n, \r\n, \r, \v, \f, \x1c-\x1e, \x85,  ,  ,
+/// The lines of `s`: splits on \n, \r\n, \r, \v, \f, \x1c-\x1e, \x85, U+2028, U+2029,
 /// and drops the line ends. A final line end doesn't make an empty last line.
-pub fn splitlines(s: &str) -> Vec<&str> {
+pub fn split_lines(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0;
     let mut chars = s.char_indices().peekable();
@@ -263,14 +293,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn float_repr_matches_python() {
+    fn float_text_is_shortest_round_trip() {
         for (x, want) in [(0.1, "0.1"), (1.0, "1.0"), (1e16, "1e+16"), (1e-5, "1e-05"), (123.456, "123.456"), (0.0001, "0.0001")] {
-            assert_eq!(float_repr(x), want);
+            assert_eq!(float_text(x), want);
         }
     }
 
     #[test]
-    fn parse_int_matches_python() {
+    fn parse_int_accepts_signs_and_underscores() {
         assert_eq!(parse_int(" 12 "), Some(12));
         assert_eq!(parse_int("-1_000"), Some(-1000));
         assert_eq!(parse_int("+7"), Some(7));
@@ -281,19 +311,19 @@ mod tests {
     }
 
     #[test]
-    fn repr_matches_python() {
-        assert_eq!(repr("abc"), "'abc'");
-        assert_eq!(repr("it's"), "\"it's\"");
-        assert_eq!(repr("it's \"x\""), "'it\\'s \"x\"'");
-        assert_eq!(repr("a\nb\\c\x07é\u{a0}🦀"), "'a\\nb\\\\c\\x07é\\xa0🦀'");
+    fn quote_escapes_and_picks_quotes() {
+        assert_eq!(quote("abc"), "'abc'");
+        assert_eq!(quote("it's"), "\"it's\"");
+        assert_eq!(quote("it's \"x\""), "'it\\'s \"x\"'");
+        assert_eq!(quote("a\nb\\c\x07é\u{a0}🦀"), "'a\\nb\\\\c\\x07é\\xa0🦀'");
         let v: Value = serde_json::from_str(r#"{"a": [1, 2.5, null, true], "b": "x"}"#).unwrap();
-        assert_eq!(repr_value(&v), "{'a': [1, 2.5, None, True], 'b': 'x'}");
+        assert_eq!(literal(&v), "{'a': [1, 2.5, None, True], 'b': 'x'}");
     }
 
     #[test]
-    fn splitlines_matches_python() {
-        assert_eq!(splitlines("a\r\nb\rc\n"), vec!["a", "b", "c"]);
-        assert_eq!(splitlines("a\n\nb"), vec!["a", "", "b"]);
-        assert!(splitlines("").is_empty());
+    fn split_lines_handles_every_line_break() {
+        assert_eq!(split_lines("a\r\nb\rc\n"), vec!["a", "b", "c"]);
+        assert_eq!(split_lines("a\n\nb"), vec!["a", "", "b"]);
+        assert!(split_lines("").is_empty());
     }
 }

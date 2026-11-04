@@ -1,4 +1,5 @@
-//! Python 3.11's `mimetypes._types_map_default` (strict), generated from that module.
+//! The default suffix-to-type table, with the compression suffixes, the suffix aliases
+//! (`.tgz` is `.tar.gz`) and the system `mime.types` files read on top of it.
 
 pub const DEFAULT_TYPES: [(&str, &str); 149] = [
     (".js", "application/javascript"),

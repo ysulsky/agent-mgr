@@ -2,7 +2,7 @@
 
 Agent Mgr runs a hierarchy of agents. You talk to a home manager, the home manager creates projects, and each project has a manager that delegates work to workers. Each agent is a `claude` or `codex` CLI session. A daemon runs the sessions, delivers messages between them, and serves a web UI.
 
-Agent Mgr is a single Rust binary, `am`: the CLI, the daemon and the turn supervisors. It was ported from an earlier Python implementation and reads and writes the same files.
+Agent Mgr is a single Rust binary, `am`: the CLI, the daemon and the turn supervisors.
 
 ## Getting started
 
@@ -167,6 +167,6 @@ cargo clippy --all-targets
 | `crates/am-server` | The daemon's lifecycle and the web server |
 | `crates/am` | The `am` binary: the CLI and dispatch to the daemon and supervisors |
 
-The files on disk keep the exact formats the Python implementation wrote (`am_core::json`, `am_core::py`), so existing homes work unchanged. Use `am_core::write_json` for records, and `shift_remove` rather than `Map::remove`, which reorders keys (`clippy.toml` forbids it).
+The on-disk formats are specified in the code and must not drift, since every home depends on them: records are written by `am_core::write_json` with `am_core::json::encode` (one-space indentation, non-ASCII kept as is, a trailing newline), and values become text through `am_core::format`. Remove keys from a record with `shift_remove`, which keeps the order of the others, rather than `Map::remove`, which reorders them (`clippy.toml` forbids it).
 
-The tests here are unit tests. The end-to-end suite, which ran the real daemon and real processes against a fake agent CLI and drove the UI in a browser, used the Python implementation as its oracle and isn't part of this repository; porting it to Rust is a follow-up.
+The tests here are unit tests. An end-to-end suite, which runs the real daemon and real processes against a stand-in agent CLI and drives the UI in a browser, is a follow-up. The hidden `am __debug` commands are its hooks.

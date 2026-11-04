@@ -1,7 +1,6 @@
-//! What the two supervisors share, kept free of the rest of the crate as Python's
-//! `am.turn` and `am.proc` are free of imports: raw clocks (no test hooks, as their own
-//! copies of `awake_time` have none), the compact `json.dumps(obj)` they write, locks,
-//! signals and spawning in a new session.
+//! What the two supervisors share, kept free of the rest of the crate so they depend on
+//! little: the clocks, the compact JSON they write, locks, signals and spawning in a new
+//! session.
 
 use am_core::{json, Value};
 use std::fs;
@@ -10,31 +9,33 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// `time.time()`, with no test offset: the supervisors read the clock directly.
+/// Wall-clock seconds since the epoch, with no test offset: the supervisors read the
+/// clock directly.
 pub fn wall() -> f64 {
     let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     d.as_nanos() as f64 / 1e9
 }
 
-/// The supervisors' `_awake_time`: `am_core::awake_time`, which honours the
-/// `awake_offset` test hook, as Python's `am.proc` and `am.turn` now do.
+/// The supervisors' awake time: `am_core::awake_time`, which honours the `awake_offset`
+/// test hook.
 pub fn awake() -> f64 {
     am_core::awake_time()
 }
 
-/// `json.dumps(obj)` with Python's defaults: `", "` and `": "`, and `ensure_ascii`.
-pub use am_core::json::dumps_ascii;
+/// JSON on one line, with `", "` and `": "` between items and everything outside
+/// printable ASCII escaped.
+pub use am_core::json::encode_ascii;
 
-/// The supervisors' `_write_atomic`: `.tmp-<name>` beside it, then a rename. No fsync.
+/// Write `v` to `path` atomically: `.tmp-<name>` beside it, then a rename. No fsync.
 pub fn write_atomic(path: &Path, v: &Value) {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = path.with_file_name(format!(".tmp-{name}"));
-    if fs::write(&tmp, dumps_ascii(v)).is_ok() {
+    if fs::write(&tmp, encode_ascii(v)).is_ok() {
         let _ = fs::rename(&tmp, path);
     }
 }
 
-/// `_read_json` of `am.proc`: None for a missing or unreadable file.
+/// The JSON in `path`: None for a missing or unreadable file.
 pub fn read_json(path: &Path) -> Option<Value> {
     let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -50,12 +51,12 @@ pub fn try_lock(path: &Path) -> Option<fs::File> {
     Some(f)
 }
 
-/// `os.killpg(pid, sig)`. False if it failed (no such group, or not ours).
+/// Send `sig` to the process group `pid`. False if it failed (no such group, or not ours).
 pub fn killpg(pid: u32, sig: i32) -> bool {
     unsafe { libc::killpg(pid as libc::pid_t, sig) == 0 }
 }
 
-/// `am.core.wake_daemon` with the FIFO's path from `cmd.json`: one byte, never blocking.
+/// Wake the daemon through the FIFO whose path `cmd.json` gives: one byte, never blocking.
 pub fn wake(path: Option<&Value>) {
     if let Some(Value::String(path)) = path {
         if !path.is_empty() {
@@ -85,7 +86,7 @@ pub fn stop_requested() -> bool {
     STOP.load(Ordering::SeqCst)
 }
 
-/// `subprocess.Popen(..., start_new_session=True)`.
+/// Start the command in a new session of its own (`setsid` in the child).
 pub fn new_session(cmd: &mut std::process::Command) {
     unsafe {
         cmd.pre_exec(|| {
@@ -97,19 +98,19 @@ pub fn new_session(cmd: &mut std::process::Command) {
     }
 }
 
-/// `str(OSError)` as Python prints it: `[Errno 2] No such file or directory: 'claude'`.
+/// An OS error as the supervisors report it: `[Errno 2] No such file or directory: 'claude'`.
 pub fn os_error_text(e: &std::io::Error, filename: &str) -> String {
     match e.raw_os_error() {
         Some(errno) => {
             let msg = unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)) }.to_string_lossy().into_owned();
-            format!("[Errno {errno}] {msg}: {}", py_repr(filename))
+            format!("[Errno {errno}] {msg}: {}", quote_filename(filename))
         }
         None => e.to_string(),
     }
 }
 
-/// `repr(str)` for a file name: single quotes unless it has one and no double quote.
-pub fn py_repr(s: &str) -> String {
+/// A file name quoted for messages: single quotes unless it has one and no double quote.
+pub fn quote_filename(s: &str) -> String {
     let q = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
     let mut out = String::new();
     out.push(q);
@@ -131,7 +132,7 @@ pub fn py_repr(s: &str) -> String {
     out
 }
 
-/// A child's exit as `Popen.returncode` gives it: the code, or minus the signal.
+/// A child's exit status as one number: the code, or minus the signal.
 pub fn return_code(status: std::process::ExitStatus) -> i64 {
     use std::os::unix::process::ExitStatusExt;
     match (status.code(), status.signal()) {
@@ -145,11 +146,12 @@ pub fn return_code(status: std::process::ExitStatus) -> i64 {
 pub fn argv_of(spec: &Value) -> Vec<String> {
     spec.get("argv")
         .and_then(Value::as_array)
-        .map(|a| a.iter().map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| json::dumps_compact(v))).collect())
+        .map(|a| a.iter().map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| json::encode_compact(v))).collect())
         .unwrap_or_default()
 }
 
-/// `float(spec.get(key, default))`.
+/// `spec[key]` as a float: a number, a string holding one, or a bool as 0 or 1.
+/// `default` for anything else.
 pub fn f64_field(spec: &Value, key: &str, default: f64) -> f64 {
     match spec.get(key) {
         Some(Value::Number(n)) => n.as_f64().unwrap_or(default),
@@ -159,8 +161,9 @@ pub fn f64_field(spec: &Value, key: &str, default: f64) -> f64 {
     }
 }
 
-/// Spawn `argv` in `cwd` in a session of its own, with the files given, reporting a
-/// failure as Python's `Popen` would.
+/// Spawn `argv` in `cwd` in a session of its own, with the files given. A failure comes
+/// back as text: an `os_error_text` naming `cwd` or the program, or `list index out of
+/// range` for an empty `argv`.
 pub fn spawn(
     argv: &[String],
     cwd: &str,
@@ -186,7 +189,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn os_errors_read_like_python() {
+    fn os_errors_name_the_errno_and_file() {
         let e = std::io::Error::from_raw_os_error(libc::ENOENT);
         assert_eq!(os_error_text(&e, "claude"), "[Errno 2] No such file or directory: 'claude'");
     }

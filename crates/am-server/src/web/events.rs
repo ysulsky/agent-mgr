@@ -1,4 +1,4 @@
-//! Live events (`web.Hub`, `api_events`): tells open pages what changed, so they can fetch
+//! Live events (`Hub`, `api_events`): tells open pages what changed, so they can fetch
 //! it. CLI writes touch `<project>/.changed` and wake the daemon, which sets `hub_wake`;
 //! artifact edits by agents show up in a scan of artifacts/.
 
@@ -35,7 +35,7 @@ fn scan_artifacts(slug: &str) -> BTreeMap<String, f64> {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             let path = entry.path();
-            // os.walk's is_dir follows links; it lists a linked dir but doesn't walk it.
+            // A link to a directory counts as a directory, not a file, but isn't walked.
             let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
             if is_dir {
                 if !name.starts_with('.') && !entry.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
@@ -62,7 +62,7 @@ impl Hub {
     }
 
     pub fn publish(&self, event: &Value) {
-        let text = am_core::json::dumps_ascii(event);
+        let text = am_core::json::encode_ascii(event);
         let mut subscribers = self.subscribers.lock().unwrap();
         subscribers.retain(|(_, queue)| !matches!(queue.try_send(text.clone()), Err(mpsc::error::TrySendError::Closed(_))));
     }

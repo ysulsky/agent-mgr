@@ -1,5 +1,5 @@
-//! The types aiohttp's `FileResponse` guesses from a suffix: Python 3.11's built-in
-//! `mimetypes` table (not the system's mime.types), plus aiohttp's additions. Generated.
+//! The Content-Type of a served file, by its suffix: the project's own table, not the
+//! system's mime.types, so it's the same on every machine.
 
 pub fn guess(suffix: &str) -> Option<&'static str> {
     Some(match suffix {

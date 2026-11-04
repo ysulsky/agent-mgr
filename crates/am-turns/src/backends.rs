@@ -13,12 +13,12 @@
 //! the difference from the totals the session had when the turn started, `base`.
 //! Codex reports tokens but not cost.
 
-use crate::pyv;
+use crate::convert;
 use am_core::{am_err, json, Result, Value};
 use serde_json::{json, Map};
 use std::path::Path;
 
-/// `backends.TurnSpec`.
+/// How to run one turn.
 #[derive(Clone, Debug, Default)]
 pub struct TurnSpec {
     pub backend: String,
@@ -35,7 +35,7 @@ pub struct TurnSpec {
     pub persistent: bool,
 }
 
-/// Token counts, in the order Python's dict has them.
+/// Token counts, in the order they're written: `input`, `cached_input`, `output`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Tokens {
     pub input: i64,
@@ -49,7 +49,7 @@ impl Tokens {
     }
 }
 
-/// `backends.StreamResult`.
+/// What `parse_stream` read from a turn's stream.
 #[derive(Clone, Debug, Default)]
 pub struct StreamResult {
     pub final_: String,
@@ -61,7 +61,7 @@ pub struct StreamResult {
     pub error: String,
     pub saw_result: bool,
     /// The session's running totals at the end of the turn: `cost_usd` (a float) for
-    /// Claude, `input` (cached included), `cached_input` and `output` (ints) for Codex.
+    /// Claude, `input` (cached included), `cached_input` and `output` (integers) for Codex.
     pub running: Map<String, Value>,
 }
 
@@ -82,13 +82,13 @@ pub fn build_command(spec: &TurnSpec, cfg: &Value) -> Result<(Vec<String>, Optio
 
 fn strings(v: Option<&Value>) -> Vec<String> {
     match v {
-        Some(Value::Array(a)) => a.iter().map(pyv::str_of).collect(),
+        Some(Value::Array(a)) => a.iter().map(convert::text).collect(),
         _ => vec![],
     }
 }
 
 fn claude_command(spec: &TurnSpec, conf: &Value) -> (Vec<String>, Option<String>) {
-    let mut argv: Vec<String> = vec![pyv::str_of(&conf["bin"]), "-p".into(), "--output-format".into(), "stream-json".into(), "--verbose".into()];
+    let mut argv: Vec<String> = vec![convert::text(&conf["bin"]), "-p".into(), "--output-format".into(), "stream-json".into(), "--verbose".into()];
     if spec.persistent {
         argv.extend(["--input-format", "stream-json", "--replay-user-messages"].map(String::from));
     }
@@ -107,10 +107,10 @@ fn claude_command(spec: &TurnSpec, conf: &Value) -> (Vec<String>, Option<String>
         argv.extend(["--model".into(), spec.model.clone()]);
     }
     argv.extend(["--append-system-prompt".into(), spec.system_prompt.clone()]);
-    if am_core::py::truthy(conf.get("permission_mode")) {
-        argv.extend(["--permission-mode".into(), pyv::str_of(&conf["permission_mode"])]);
+    if am_core::format::truthy(conf.get("permission_mode")) {
+        argv.extend(["--permission-mode".into(), convert::text(&conf["permission_mode"])]);
     }
-    if am_core::py::truthy(conf.get("allowed_tools")) {
+    if am_core::format::truthy(conf.get("allowed_tools")) {
         argv.extend(["--allowedTools".into(), strings(conf.get("allowed_tools")).join(",")]);
     }
     argv.extend(["--add-dir".into(), spec.am_home.clone()]);
@@ -120,11 +120,11 @@ fn claude_command(spec: &TurnSpec, conf: &Value) -> (Vec<String>, Option<String>
 
 /// A JSON string is a valid TOML basic string for everything we send.
 fn toml_string(value: &str) -> String {
-    json::dumps_compact(&Value::String(value.to_string()))
+    json::encode_compact(&Value::String(value.to_string()))
 }
 
 fn codex_command(spec: &TurnSpec, conf: &Value) -> Vec<String> {
-    let mut argv: Vec<String> = vec![pyv::str_of(&conf["bin"]), "exec".into()];
+    let mut argv: Vec<String> = vec![convert::text(&conf["bin"]), "exec".into()];
     match spec.session.as_deref().filter(|s| !s.is_empty()) {
         Some(session) if spec.fork => argv.extend(["fork".into(), session.to_string()]),
         Some(session) => argv.extend(["resume".into(), session.to_string()]),
@@ -138,12 +138,12 @@ fn codex_command(spec: &TurnSpec, conf: &Value) -> Vec<String> {
         argv.extend(["-m".into(), spec.model.clone()]);
     }
     argv.extend(["-c".into(), format!("developer_instructions={}", toml_string(&spec.system_prompt))]);
-    let sandbox = if am_core::py::truthy(conf.get("sandbox")) { pyv::str_of(&conf["sandbox"]) } else { "workspace-write".into() };
+    let sandbox = if am_core::format::truthy(conf.get("sandbox")) { convert::text(&conf["sandbox"]) } else { "workspace-write".into() };
     argv.extend(["-c".into(), format!("sandbox_mode={}", toml_string(&sandbox)), "-c".into(), "approval_policy=\"never\"".into()]);
     if sandbox == "workspace-write" {
-        let roots = json::dumps_compact(&json!([spec.am_home, spec.project_dir]));
+        let roots = json::encode_compact(&json!([spec.am_home, spec.project_dir]));
         argv.extend(["-c".into(), format!("sandbox_workspace_write.writable_roots={roots}")]);
-        let network = if conf.get("network").is_none_or(|v| am_core::py::truthy(Some(v))) { "true" } else { "false" };
+        let network = if conf.get("network").is_none_or(|v| am_core::format::truthy(Some(v))) { "true" } else { "false" };
         argv.extend(["-c".into(), format!("sandbox_workspace_write.network_access={network}")]);
     }
     argv.extend(strings(conf.get("extra_args")));
@@ -151,12 +151,12 @@ fn codex_command(spec: &TurnSpec, conf: &Value) -> Vec<String> {
     argv
 }
 
-/// `shutil.which(bin) is not None`, on this process's PATH.
+/// Whether `which` finds the backend's `bin`, on this process's PATH.
 pub fn available(backend: &str, cfg: &Value) -> bool {
-    which(&pyv::str_of(&cfg["backends"][backend]["bin"])).is_some()
+    which(&convert::text(&cfg["backends"][backend]["bin"])).is_some()
 }
 
-/// `shutil.which`: an executable file, given as a path or found on PATH.
+/// An executable file, given as a path or found on PATH.
 pub fn which(cmd: &str) -> Option<std::path::PathBuf> {
     use std::os::unix::ffi::OsStrExt;
     let ok = |p: &Path| {
@@ -185,14 +185,14 @@ pub fn which(cmd: &str) -> Option<std::path::PathBuf> {
 
 // ---------------------------------------------------------------- reading streams
 
-/// `_lines`: each line of the file that is a JSON object, as Python reads the file in
-/// text mode (universal newlines, invalid UTF-8 replaced).
+/// Each line of the file that is a JSON object. A line ends at `\n`, `\r\n` or `\r`, and
+/// invalid UTF-8 is replaced.
 pub fn lines(path: &Path) -> Vec<Map<String, Value>> {
     let Ok(bytes) = std::fs::read(path) else { return vec![] };
     let text = String::from_utf8_lossy(&bytes);
     let mut out = Vec::new();
     for line in text.split('\n').flat_map(|l| l.split('\r')) {
-        let line = am_core::py::strip(line);
+        let line = am_core::format::strip(line);
         if line.is_empty() {
             continue;
         }
@@ -207,11 +207,11 @@ pub fn lines(path: &Path) -> Vec<Map<String, Value>> {
 /// (see `StreamResult::running`), or None for a new session.
 pub fn parse_stream(backend: &str, path: &Path, pricing: Option<&Value>, model: &str, base: Option<&Value>) -> StreamResult {
     let empty = json!({});
-    let base = base.filter(|b| am_core::py::truthy(Some(b))).unwrap_or(&empty);
+    let base = base.filter(|b| am_core::format::truthy(Some(b))).unwrap_or(&empty);
     if backend == "claude" {
         parse_claude(path, base)
     } else {
-        let pricing = pricing.filter(|p| am_core::py::truthy(Some(p))).unwrap_or(&empty);
+        let pricing = pricing.filter(|p| am_core::format::truthy(Some(p))).unwrap_or(&empty);
         parse_codex(path, pricing, model, base)
     }
 }
@@ -237,7 +237,7 @@ fn parse_claude(path: &Path, base: &Value) -> StreamResult {
         let kind = get(&obj, "type").and_then(Value::as_str).unwrap_or("");
         if kind == "system" && get(&obj, "subtype").and_then(Value::as_str) == Some("init") {
             if out.session.as_deref().is_none_or(str::is_empty) {
-                out.session = pyv::opt_str(get(&obj, "session_id"));
+                out.session = convert::opt_str(get(&obj, "session_id"));
             }
         } else if kind == "assistant" {
             let content = get(&obj, "message").and_then(|m| m.get("content"));
@@ -249,34 +249,34 @@ fn parse_claude(path: &Path, base: &Value) -> StreamResult {
                     }
                 }
             }
-            if !am_core::py::strip(&text).is_empty() {
+            if !am_core::format::strip(&text).is_empty() {
                 last_text = text;
             }
         } else if kind == "result" {
             out.saw_result = true;
-            if let Some(s) = pyv::opt_str(get(&obj, "session_id")).filter(|s| !s.is_empty()) {
+            if let Some(s) = convert::opt_str(get(&obj, "session_id")).filter(|s| !s.is_empty()) {
                 out.session = Some(s);
             }
             if let Some(cost) = get(&obj, "total_cost_usd").filter(|v| !v.is_null()) {
-                out.running.insert("cost_usd".into(), pyv::float_value(pyv::py_float(cost)));
+                out.running.insert("cost_usd".into(), convert::float_value(convert::to_float(cost)));
             }
             let usage = get(&obj, "usage").cloned().unwrap_or(Value::Null);
-            let n = |k: &str| pyv::py_int(usage.get(k));
+            let n = |k: &str| convert::to_int(usage.get(k));
             out.tokens.input += n("input_tokens") + n("cache_creation_input_tokens");
             out.tokens.cached_input += n("cache_read_input_tokens");
             out.tokens.output += n("output_tokens");
-            let text = pyv::or_str(get(&obj, "result"));
-            let is_error = am_core::py::truthy(get(&obj, "is_error"));
+            let text = convert::or_str(get(&obj, "result"));
+            let is_error = am_core::format::truthy(get(&obj, "is_error"));
             // The opening empty result of a resumed session says nothing.
-            if !am_core::py::strip(&text).is_empty() || is_error {
+            if !am_core::format::strip(&text).is_empty() || is_error {
                 out.is_error = is_error;
                 if is_error {
                     out.error = if !text.is_empty() {
                         text
-                    } else if am_core::py::truthy(get(&obj, "errors")) {
-                        crate::sys::dumps_ascii(&obj["errors"])
-                    } else if am_core::py::truthy(get(&obj, "subtype")) {
-                        pyv::str_of(&obj["subtype"])
+                    } else if am_core::format::truthy(get(&obj, "errors")) {
+                        crate::sys::encode_ascii(&obj["errors"])
+                    } else if am_core::format::truthy(get(&obj, "subtype")) {
+                        convert::text(&obj["subtype"])
                     } else {
                         "error".into()
                     };
@@ -291,8 +291,8 @@ fn parse_claude(path: &Path, base: &Value) -> StreamResult {
         out.final_ = last_text;
     }
     if let Some(cost) = out.running.get("cost_usd").and_then(Value::as_f64) {
-        let b = if am_core::py::truthy(base.get("cost_usd")) { pyv::py_float(&base["cost_usd"]) } else { 0.0 };
-        out.cost_usd = pyv::py_max(since(cost, b), 0.0);
+        let b = if am_core::format::truthy(base.get("cost_usd")) { convert::to_float(&base["cost_usd"]) } else { 0.0 };
+        out.cost_usd = convert::max_of(since(cost, b), 0.0);
     }
     out
 }
@@ -300,23 +300,23 @@ fn parse_claude(path: &Path, base: &Value) -> StreamResult {
 fn parse_codex(path: &Path, pricing: &Value, model: &str, base: &Value) -> StreamResult {
     let mut out = StreamResult::default();
     let mut last_text = String::new();
-    let prices = pricing.get(model).filter(|p| am_core::py::truthy(Some(p))).cloned().unwrap_or(json!({}));
+    let prices = pricing.get(model).filter(|p| am_core::format::truthy(Some(p))).cloned().unwrap_or(json!({}));
     for obj in lines(path) {
         let kind = get(&obj, "type").and_then(Value::as_str).unwrap_or("");
         if kind == "thread.started" {
             if out.session.as_deref().is_none_or(str::is_empty) {
-                out.session = pyv::opt_str(get(&obj, "thread_id"));
+                out.session = convert::opt_str(get(&obj, "thread_id"));
             }
         } else if kind == "item.completed" {
             let item = get(&obj, "item").cloned().unwrap_or(Value::Null);
-            let text = pyv::or_str(item.get("text"));
-            if item.get("type").and_then(Value::as_str) == Some("agent_message") && !am_core::py::strip(&text).is_empty() {
+            let text = convert::or_str(item.get("text"));
+            if item.get("type").and_then(Value::as_str) == Some("agent_message") && !am_core::format::strip(&text).is_empty() {
                 last_text = text;
             }
         } else if kind == "turn.completed" {
             out.saw_result = true;
             let usage = get(&obj, "usage").cloned().unwrap_or(Value::Null);
-            let n = |k: &str| pyv::py_int(usage.get(k));
+            let n = |k: &str| convert::to_int(usage.get(k));
             out.running = Map::new();
             out.running.insert("input".into(), n("input_tokens").into());
             out.running.insert("cached_input".into(), n("cached_input_tokens").into());
@@ -327,15 +327,15 @@ fn parse_codex(path: &Path, pricing: &Value, model: &str, base: &Value) -> Strea
         }
     }
     if !out.running.is_empty() {
-        let b = |k: &str| pyv::py_int(base.get(k));
+        let b = |k: &str| convert::to_int(base.get(k));
         let r = |k: &str| out.running.get(k).and_then(Value::as_i64).unwrap_or(0);
         // One running total started again means they all did.
         let reset = ["input", "cached_input", "output"].iter().any(|k| r(k) < b(k));
         let d = |k: &str| r(k) - if reset { 0 } else { b(k) };
         let (total_in, cached, output) = (d("input"), d("cached_input"), d("output"));
         out.tokens = Tokens { input: (total_in - cached).max(0), cached_input: cached, output };
-        if am_core::py::truthy(Some(&prices)) {
-            let price = |k: &str, default: f64| prices.get(k).map_or(default, pyv::py_float);
+        if am_core::format::truthy(Some(&prices)) {
+            let price = |k: &str, default: f64| prices.get(k).map_or(default, convert::to_float);
             let input_price = price("input", 0.0);
             out.cost_is_estimate = true;
             out.cost_usd = ((total_in - cached).max(0) as f64 * input_price
@@ -353,17 +353,18 @@ fn parse_codex(path: &Path, pricing: &Value, model: &str, base: &Value) -> Strea
     out
 }
 
-/// `str(message or error or kind)` for a codex `turn.failed` or `error` event.
+/// The text of a codex `turn.failed` or `error` event: its message, else its error, else
+/// its kind.
 fn codex_error_text(obj: &Map<String, Value>, kind: &str) -> String {
     let error = get(obj, "error");
     let message = match error {
         Some(Value::Object(e)) => e.get("message"),
         _ => get(obj, "message"),
     };
-    if am_core::py::truthy(message) {
-        pyv::str_of(message.unwrap())
-    } else if am_core::py::truthy(error) {
-        pyv::str_of(error.unwrap())
+    if am_core::format::truthy(message) {
+        convert::text(message.unwrap())
+    } else if am_core::format::truthy(error) {
+        convert::text(error.unwrap())
     } else {
         kind.to_string()
     }
@@ -373,10 +374,10 @@ fn codex_error_text(obj: &Map<String, Value>, kind: &str) -> String {
 pub fn peek_session(backend: &str, path: &Path) -> Option<String> {
     for obj in lines(path) {
         if backend == "codex" && get(&obj, "type").and_then(Value::as_str) == Some("thread.started") {
-            return pyv::opt_str(get(&obj, "thread_id"));
+            return convert::opt_str(get(&obj, "thread_id"));
         }
-        if backend == "claude" && am_core::py::truthy(get(&obj, "session_id")) {
-            return pyv::opt_str(get(&obj, "session_id"));
+        if backend == "claude" && am_core::format::truthy(get(&obj, "session_id")) {
+            return convert::opt_str(get(&obj, "session_id"));
         }
     }
     None
@@ -387,7 +388,7 @@ pub fn peek_session(backend: &str, path: &Path) -> Option<String> {
 fn clip(text: &Value, limit: usize) -> String {
     let text = match text {
         Value::String(s) => s.clone(),
-        other => json::dumps_compact(other),
+        other => json::encode_compact(other),
     };
     let n = text.chars().count();
     if n <= limit {
@@ -400,7 +401,7 @@ fn clip(text: &Value, limit: usize) -> String {
 
 fn tool_summary(tool_input: &Value) -> String {
     for key in ["command", "file_path", "path", "pattern", "url", "query", "description", "prompt"] {
-        if am_core::py::truthy(tool_input.get(key)) {
+        if am_core::format::truthy(tool_input.get(key)) {
             return clip(&tool_input[key], 400);
         }
     }
@@ -418,7 +419,7 @@ pub fn normalize_events(backend: &str, obj: &Value) -> Vec<Value> {
 
 fn or_empty_object(v: Option<&Value>) -> Value {
     match v {
-        Some(v) if am_core::py::truthy(Some(v)) => v.clone(),
+        Some(v) if am_core::format::truthy(Some(v)) => v.clone(),
         _ => json!({}),
     }
 }
@@ -435,7 +436,7 @@ fn normalize_claude(obj: &Value) -> Vec<Value> {
                     }
                     let btype = block.get("type").and_then(Value::as_str);
                     let text = block.get("text").and_then(Value::as_str).unwrap_or("");
-                    if btype == Some("text") && !am_core::py::strip(text).is_empty() {
+                    if btype == Some("text") && !am_core::format::strip(text).is_empty() {
                         out.push(json!({"k": "text", "text": block["text"]}));
                     } else if btype == Some("tool_use") {
                         let name = block.get("name").cloned().unwrap_or(json!("tool"));
@@ -457,19 +458,19 @@ fn normalize_claude(obj: &Value) -> Vec<Value> {
                                 .collect();
                             body = Value::String(texts.join("\n"));
                         }
-                        let body = if am_core::py::truthy(Some(&body)) { body } else { json!("") };
-                        out.push(json!({"k": "output", "text": clip(&body, 4000), "error": am_core::py::truthy(block.get("is_error"))}));
+                        let body = if am_core::format::truthy(Some(&body)) { body } else { json!("") };
+                        out.push(json!({"k": "output", "text": clip(&body, 4000), "error": am_core::format::truthy(block.get("is_error"))}));
                     }
                 }
             }
         }
         "result" => {
             let text = match obj.get("result") {
-                Some(v) if am_core::py::truthy(Some(v)) => v.clone(),
+                Some(v) if am_core::format::truthy(Some(v)) => v.clone(),
                 _ => json!(""),
             };
-            let is_error = am_core::py::truthy(obj.get("is_error"));
-            if am_core::py::strip(text.as_str().unwrap_or("x")).is_empty() && !is_error {
+            let is_error = am_core::format::truthy(obj.get("is_error"));
+            if am_core::format::strip(text.as_str().unwrap_or("x")).is_empty() && !is_error {
                 return vec![];
             }
             out.push(json!({"k": "result", "text": text, "error": is_error, "cost": obj.get("total_cost_usd").cloned().unwrap_or(Value::Null)}));
@@ -496,13 +497,13 @@ fn normalize_codex(obj: &Value) -> Vec<Value> {
         return vec![json!({"k": "tool", "name": item_type, "summary": clip(&Value::Object(rest), 400)})];
     }
     if kind == "item.completed" {
-        let text = pyv::or_str(item.get("text"));
-        if item_type == "agent_message" && !am_core::py::strip(&text).is_empty() {
+        let text = convert::or_str(item.get("text"));
+        if item_type == "agent_message" && !am_core::format::strip(&text).is_empty() {
             return vec![json!({"k": "text", "text": item["text"]})];
         }
         if item_type == "command_execution" {
             let output = match item.get("aggregated_output") {
-                Some(v) if am_core::py::truthy(Some(v)) => v.clone(),
+                Some(v) if am_core::format::truthy(Some(v)) => v.clone(),
                 _ => json!(""),
             };
             let error = match item.get("exit_code") {
@@ -524,8 +525,8 @@ fn normalize_codex(obj: &Value) -> Vec<Value> {
 }
 
 /// Normalized events from a byte offset on, and the offset to continue from. Stops at
-/// the last complete line, so a line being written is read next time. Python's default
-/// `max_bytes` is 2,000,000.
+/// the last complete line, so a line being written is read next time. Reads at most
+/// `max_bytes` (the web server asks for 2,000,000).
 pub fn read_events(backend: &str, path: &Path, offset: u64, max_bytes: u64) -> (Vec<Value>, u64) {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut f) = std::fs::File::open(path) else { return (vec![], offset) };
@@ -535,7 +536,7 @@ pub fn read_events(backend: &str, path: &Path, offset: u64, max_bytes: u64) -> (
     }
     let Some(end) = data.iter().rposition(|b| *b == b'\n') else { return (vec![], offset) };
     let mut events = Vec::new();
-    // bytes.splitlines(): \n, \r\n and \r.
+    // A line ends at \n, \r\n or \r.
     let chunk = &data[..end + 1];
     let mut start = 0;
     let mut i = 0;
@@ -586,7 +587,7 @@ mod tests {
         assert_eq!(r.session.as_deref(), Some("s1"));
         assert_eq!(r.tokens, Tokens { input: 10, cached_input: 5, output: 2 });
         assert_eq!(r.cost_usd, 0.53 - 0.5);
-        assert_eq!(json::dumps_compact(&Value::Object(r.running)), "{\"cost_usd\": 0.53}");
+        assert_eq!(json::encode_compact(&Value::Object(r.running)), "{\"cost_usd\": 0.53}");
     }
 
     #[test]

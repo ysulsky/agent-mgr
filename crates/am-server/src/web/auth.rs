@@ -1,5 +1,5 @@
 //! Who may ask: the session cookie, capability tokens for artifacts, the private host name
-//! and the same-origin check (`web.py`, "auth").
+//! and the same-origin check.
 
 use super::http::{found, quote, raised, Fail, Req};
 use crate::daemon::{hex, hmac_sha256, web_token};
@@ -9,7 +9,7 @@ pub const COOKIE: &str = "am_session";
 /// A capability lasts 12 to 13 hours: see `make_capability`.
 pub const CAP_MIN_LIFETIME: f64 = 12.0 * 3600.0;
 
-/// Constant-time equality (`hmac.compare_digest`).
+/// Constant-time equality.
 pub fn same(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -35,8 +35,6 @@ fn capability_signature(slug: &str, expiry: u64) -> Result<String> {
     Ok(full[..40].to_string())
 }
 
-/// Port of `web.make_capability`.
-///
 /// A token for GETs of one project's artifacts and results. Expiry rounds up to
 /// the hour: it lasts 12 to 13 hours, and URLs stay the same within an hour, so
 /// artifacts' relative images and scripts cache.
@@ -46,7 +44,7 @@ pub fn make_capability(slug: &str, at: Option<f64>) -> Result<String> {
     Ok(format!("{expiry}.{}", capability_signature(slug, expiry)?))
 }
 
-/// Port of `web.check_capability`.
+/// Whether `token` is a capability for `slug` that hasn't expired.
 pub fn check_capability(token: &str, slug: &str, at: Option<f64>) -> Result<bool> {
     let at = at.unwrap_or_else(am_core::now);
     let (expiry_text, signature) = token.split_once('.').unwrap_or((token, ""));
@@ -68,7 +66,7 @@ pub fn is_same_origin(req: &Req) -> bool {
     }
 }
 
-/// `_check_host`: only the private name is answered, but the token on any name is sent on
+/// Only the private name is answered, but the token on any name is sent on
 /// to it.
 pub fn check_host(expected: Option<&str>, req: &Req) -> Result<(), Fail> {
     let Some(expected) = expected else { return Ok(()) };
@@ -118,15 +116,15 @@ mod tests {
             assert!(!check_capability(&forged, "demo", Some(at)).unwrap(), "the expiry is signed");
             assert!(!check_capability("garbage", "demo", Some(at)).unwrap());
         });
-        // What Python makes with the token "k": web.make_capability("demo", 1_800_000_000.0)
-        // and web._session_value(). Links survive a switch of implementation.
-        let python = "1800043200.97faa20ee0db739ec2ede9b9ccdc4f76a1a85411";
+        // Known values for the token "k": the capability for "demo" at 1_800_000_000 and
+        // the session cookie. They mustn't change, so links and sign-ins survive an upgrade.
+        let known = "1800043200.97faa20ee0db739ec2ede9b9ccdc4f76a1a85411";
         with_token("k", || {
-            assert_eq!(make_capability("demo", Some(1_800_000_000.0)).unwrap(), python);
+            assert_eq!(make_capability("demo", Some(1_800_000_000.0)).unwrap(), known);
             assert_eq!(session_value().unwrap(), "0bb53d62316e42a7cd33bff18d7325132c20ede592ca516c7fd78af12265e37c");
         });
         with_token("another-token", || {
-            assert!(!check_capability(python, "demo", Some(1_800_000_000.0)).unwrap(), "changing the web token revokes them");
+            assert!(!check_capability(known, "demo", Some(1_800_000_000.0)).unwrap(), "changing the web token revokes them");
         });
     }
 }

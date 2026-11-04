@@ -1,20 +1,34 @@
-//! `config.toml` (`am.config`): defaults, loading, the template `am setup` writes, and a
-//! comment-preserving `set_string`. The template and defaults are copies of Python's
-//! `config.TEMPLATE` and `config.DEFAULTS`; a conformance test checks they still match.
+//! `config.toml`: defaults, loading, the template `am setup` writes, and `set_string`,
+//! which changes one setting and leaves the rest of the file as it was. The settings are
+//! the defaults (`config_defaults.json`) with `config.toml` merged over them; the template
+//! (`config_template.toml`) is the commented file `am setup` writes.
+//!
+//! Editing (`with_value`). The text is taken line by line, each line with its ending. A
+//! line `[name]`, with optional spaces inside and around the brackets and an optional
+//! `# comment` after, starts the table `name`. In the wanted table, the first line that
+//! sets the key (`key = value`, optionally indented, with optional spaces around the `=`)
+//! gets its value replaced. The old value is a double-quoted string (with backslash
+//! escapes), a single-quoted string, or a bare run of anything but spaces and `#`;
+//! whatever follows it on the line, such as a comment, stays. If the table doesn't set the
+//! key, `key = value` goes on the line after the table's header. If there's no such table,
+//! a blank line, `[section]` and `key = value` are added at the end (after a newline, if
+//! the text doesn't end with one). The value is written as an ASCII-only JSON string,
+//! which is also a valid TOML basic string. Every other line, comments and blank lines
+//! included, is left exactly as it was.
 
 use crate::{am_err, paths::config_path, Result, Value};
 use serde_json::Map;
 
-/// `config.TEMPLATE`, byte for byte.
+/// The commented `config.toml` that `am setup` writes.
 pub const TEMPLATE: &str = include_str!("config_template.toml");
 
-/// `config.DEFAULTS`.
+/// The default settings, which `config.toml` is merged over.
 pub fn defaults() -> Value {
     serde_json::from_str(include_str!("config_defaults.json")).expect("config_defaults.json")
 }
 
-/// `config._merge`: a deep merge where tables merge and anything else replaces. Keys of
-/// `base` keep their place; new keys follow in `over`'s order, as with Python dicts.
+/// A deep merge where tables merge and anything else replaces. Keys of `base` keep their
+/// place; new keys follow in `over`'s order.
 pub fn merge(base: &Value, over: &Value) -> Value {
     let mut out = base.clone();
     if let (Some(out_map), Some(over_map)) = (out.as_object_mut(), over.as_object()) {
@@ -29,8 +43,8 @@ pub fn merge(base: &Value, over: &Value) -> Value {
     out
 }
 
-/// A TOML value as `tomllib` gives it, as JSON. (Dates and times become strings: nothing
-/// in Agent Mgr's config uses them.)
+/// A TOML value as JSON. (Dates and times become strings: nothing in Agent Mgr's config
+/// uses them.)
 pub fn toml_to_json(v: &toml::Value) -> Value {
     match v {
         toml::Value::String(s) => Value::String(s.clone()),
@@ -43,14 +57,13 @@ pub fn toml_to_json(v: &toml::Value) -> Value {
     }
 }
 
-/// Parse TOML text as `tomllib.loads` would. The error's text is the parser's own, so it
-/// differs from Python's wording.
+/// Parse TOML text into a JSON object. The error's text is the TOML parser's own.
 pub fn parse(text: &str) -> std::result::Result<Value, toml::de::Error> {
     let table: toml::Table = text.parse()?;
     Ok(toml_to_json(&toml::Value::Table(table)))
 }
 
-/// `config.load`: the defaults with `config.toml` merged over them.
+/// The settings: the defaults with `config.toml` merged over them.
 pub fn load() -> Result<Value> {
     let path = config_path();
     let text = match std::fs::read_to_string(&path) {
@@ -64,12 +77,12 @@ pub fn load() -> Result<Value> {
     }
 }
 
-/// `json.dumps(s)` for a string. A JSON string is a valid TOML basic string.
+/// A string as ASCII-only JSON. A JSON string is a valid TOML basic string.
 fn json_ascii_string(s: &str) -> String {
-    crate::json::dumps_ascii(&Value::String(s.to_string()))
+    crate::json::encode_ascii(&Value::String(s.to_string()))
 }
 
-/// `str.splitlines(keepends=True)`.
+/// The lines of `s`, each with its line end, split where `format::split_lines` splits.
 fn splitlines_keepends(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0;
@@ -93,12 +106,12 @@ fn splitlines_keepends(s: &str) -> Vec<&str> {
     out
 }
 
-/// `config._with_value`: `text` with `key = value` in `[section]`, every other line as it was.
+/// `text` with `key = value` in `[section]`, every other line as it was.
 pub fn with_value(text: &str, section: &str, key: &str, value: &str) -> String {
     use regex::Regex;
     use std::sync::OnceLock;
     static TABLE: OnceLock<Regex> = OnceLock::new();
-    // Python's `$` also matches before a final newline, which a line read with its ending has.
+    // A line keeps its ending, so a header line may end in a newline.
     let table_re = TABLE.get_or_init(|| Regex::new(r"^\s*\[\s*([^\[\]#]+?)\s*\]\s*(#.*)?\n?\z").unwrap());
     let key_re = Regex::new(&format!(r#"(?s)^(\s*{}\s*=\s*)("(?:[^"\\\n]|\\.)*"|'[^'\n]*'|[^#\s]*)(.*)\z"#, regex::escape(key))).unwrap();
     let literal = json_ascii_string(value);
@@ -131,14 +144,14 @@ pub fn with_value(text: &str, section: &str, key: &str, value: &str) -> String {
     format!("{text}\n[{section}]\n{key} = {literal}\n")
 }
 
-/// `config.set_string`: set one string in `config.toml`, keeping its comments and layout,
-/// and return whether the file changed. Refuses, leaving the file alone, unless the result
-/// parses to exactly the old settings with this one value changed.
+/// Set one string in `config.toml`, keeping its comments and layout, and return whether
+/// the file changed. Refuses, leaving the file alone, unless the result parses to exactly
+/// the old settings with this one value changed. A missing file starts from the template.
 pub fn set_string(section: &str, key: &str, value: &str) -> Result<bool> {
     use std::os::unix::fs::PermissionsExt;
     let path = config_path();
     let (text, mode) = match std::fs::read_to_string(&path) {
-        // `Path.read_text` reads with universal newlines.
+        // CRLF and lone CR line ends are read as `\n`; the file keeps its mode.
         Ok(text) => (text.replace("\r\n", "\n").replace('\r', "\n"), std::fs::metadata(&path)?.permissions().mode() & 0o777),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (TEMPLATE.to_string(), 0o644),
         Err(e) => return Err(e.into()),
@@ -189,9 +202,9 @@ mod tests {
         assert_eq!(keys[..3], ["web", "defaults", "backends"]);
     }
 
-    /// Cases rendered by Python's `config._with_value` (testdata_set_string.json).
+    /// Recorded cases (testdata_set_string.json): text, section, key, value, and result.
     #[test]
-    fn with_value_matches_python() {
+    fn with_value_matches_the_cases() {
         let cases: Value = serde_json::from_str(include_str!("testdata_set_string.json")).unwrap();
         for case in cases.as_array().unwrap() {
             let s = |i: usize| case[i].as_str().unwrap();
@@ -210,7 +223,7 @@ mod tests {
         assert_eq!(text, TEMPLATE.replace("rclone_remote = \"\"", "rclone_remote = \"gdrive\""));
         // The same value again changes nothing.
         assert!(!set_string("storage", "rclone_remote", "gdrive").unwrap());
-        // Mode and CRLF line ends, as Python's read_text and os.stat leave them.
+        // The file keeps its mode, and its CRLF line ends become LF.
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(&path, "[storage]\r\nfolder = \"x\"\r\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -227,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn json_ascii_string_matches_json_dumps() {
+    fn json_ascii_string_matches_encode_ascii() {
         assert_eq!(json_ascii_string("a\"b\\é😀\n"), r#""a\"b\\\u00e9\ud83d\ude00\n""#);
     }
 }

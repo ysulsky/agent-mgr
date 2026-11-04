@@ -6,7 +6,7 @@
 
 use crate::gitstore::GitStore;
 use crate::projects::resolve;
-use crate::util::{self, get, repr};
+use crate::util::{self, get, quote};
 use am_core::{am_err, atomic_write, poke, project_dir, projects_dir, Result, Value};
 use serde_json::json;
 use std::collections::HashMap;
@@ -15,12 +15,11 @@ use std::sync::OnceLock;
 
 pub const ARTIFACTS: &str = "artifacts";
 
-/// Port of `artifacts.store`.
 pub fn store() -> GitStore {
     GitStore::new(projects_dir().join(".artifacts.git"), projects_dir())
 }
 
-/// `os.path.splitext(p)[1]`: the extension, ignoring a file name's leading dots.
+/// Split a path into `(root, extension)`, ignoring a file name's leading dots.
 pub fn splitext(p: &str) -> (&str, &str) {
     let sep = p.rfind('/').map_or(-1, |i| i as isize);
     let Some(dot) = p.rfind('.') else { return (p, "") };
@@ -36,7 +35,6 @@ pub fn splitext(p: &str) -> (&str, &str) {
     (p, "")
 }
 
-/// Port of `artifacts.kind_of`.
 pub fn kind_of(path: &str) -> &'static str {
     match splitext(path).1.to_lowercase().as_str() {
         ".md" | ".markdown" => "markdown",
@@ -49,36 +47,34 @@ pub fn kind_of(path: &str) -> &'static str {
     }
 }
 
-/// `PurePosixPath(name).parts` for a relative path: no empty or `.` components.
+/// The components of a relative path, without empty or `.` ones.
 fn posix_parts(name: &str) -> Vec<&str> {
     name.split('/').filter(|p| !p.is_empty() && *p != ".").collect()
 }
 
-/// Port of `artifacts.clean_name`: normalize `eval.html` or `artifacts/eval.html` to a
-/// path inside artifacts/.
+/// Normalize `eval.html` or `artifacts/eval.html` to a path inside artifacts/.
 pub fn clean_name(name: &str) -> Result<String> {
     if name.starts_with('/') {
-        return am_err(format!("expected a path inside artifacts/, got {}", repr(name)));
+        return am_err(format!("expected a path inside artifacts/, got {}", quote(name)));
     }
     let mut parts = posix_parts(name);
     if parts.first() == Some(&ARTIFACTS) {
         parts.remove(0);
     }
     if parts.is_empty() || parts.iter().any(|p| *p == ".." || *p == "." || p.starts_with('.')) {
-        return am_err(format!("invalid artifact name {}", repr(name)));
+        return am_err(format!("invalid artifact name {}", quote(name)));
     }
     Ok(parts.join("/"))
 }
 
-/// `artifacts._git_path`.
 fn git_path(slug: &str, name: &str) -> String {
     format!("{slug}/{ARTIFACTS}/{name}")
 }
 
-/// Port of `artifacts.publish`: publish a file or directory into artifacts/ and commit
-/// it. A path that's already in artifacts/ publishes the in-place edit.
+/// Publish a file or directory into artifacts/ and commit it. A path that's already in
+/// artifacts/ publishes the in-place edit.
 pub fn publish(slug: &str, source: &str, message: &str, author: Option<&str>, as_name: Option<&str>) -> Result<Value> {
-    if am_core::py::strip(message).is_empty() {
+    if am_core::format::strip(message).is_empty() {
         return am_err("say what changed with -m");
     }
     let artifacts_root = resolve(&project_dir(slug).join(ARTIFACTS));
@@ -116,7 +112,7 @@ pub fn publish(slug: &str, source: &str, message: &str, author: Option<&str>, as
     Ok(json!({"path": if name.is_empty() { ARTIFACTS.to_string() } else { format!("{ARTIFACTS}/{name}") }, "rev": rev}))
 }
 
-/// `shutil.copytree(src, dest)`: following symlinks, copying modes and times (`copy2`).
+/// Copy a directory tree, following symlinks and copying modes and times.
 fn copytree(src: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(src)? {
@@ -144,8 +140,8 @@ fn copy_times(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `urllib.parse.urlsplit(url).scheme`, or Python's ValueError for a bracketed host that
-/// doesn't close.
+/// A URL's scheme, lowercased (empty if there is none), or an error for a bracketed host
+/// that doesn't close.
 pub fn url_scheme(url: &str) -> std::result::Result<String, String> {
     let url: String = url.trim_start_matches(|c: char| c <= ' ').chars().filter(|c| !matches!(c, '\t' | '\r' | '\n')).collect();
     let mut scheme = String::new();
@@ -170,7 +166,6 @@ pub fn url_scheme(url: &str) -> std::result::Result<String, String> {
     Ok(scheme)
 }
 
-/// Port of `artifacts.link`.
 pub fn link(
     slug: &str,
     name: &str,
@@ -185,7 +180,7 @@ pub fn link(
         Err(e) => return util::crash(e),
     };
     if scheme != "http" && scheme != "https" {
-        return am_err(format!("a link artifact must be http or https, got {}", repr(url)));
+        return am_err(format!("a link artifact must be http or https, got {}", quote(url)));
     }
     let mut clean = clean_name(name)?;
     if !clean.ends_with(".link") {
@@ -194,13 +189,13 @@ pub fn link(
     let basename = clean.rsplit('/').next().unwrap_or(&clean);
     let title = if title.is_empty() { basename[..basename.len() - 5].to_string() } else { title.to_string() };
     let payload = json!({"url": url, "title": title, "description": description});
-    let text = am_core::json::dumps_with(&payload, Some(1), true) + "\n";
+    let text = am_core::json::encode_with(&payload, Some(1), true) + "\n";
     atomic_write(&project_dir(slug).join(ARTIFACTS).join(&clean), text.as_bytes(), 0o644)?;
     publish(slug, &format!("{ARTIFACTS}/{clean}"), message, author, None)
 }
 
-/// `os.walk(root)` with hidden directories pruned: each directory's files, top-down, in
-/// directory order, not following symlinked directories.
+/// The files under `dir`, skipping hidden files and directories: each directory's files,
+/// top-down, in directory order, not following symlinked directories.
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut dirs = Vec::new();
@@ -222,7 +217,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Port of `artifacts.list_artifacts`: every file, newest first.
+/// Every file in a project's artifacts, newest first.
 pub fn list_artifacts(slug: &str) -> Result<Vec<Value>> {
     let root = project_dir(slug).join(ARTIFACTS);
     let mut files = Vec::new();
@@ -258,7 +253,7 @@ fn sort_newest_first(entries: &mut [Value]) {
     });
 }
 
-/// Port of `artifacts.shown_artifacts`: a folder with an index page is one entry, named
+/// The artifacts to show: a folder with an index page is one entry, named
 /// after the folder, which opens the page. The outermost index wins, and index.html wins
 /// over index.md.
 pub fn shown_artifacts(slug: &str) -> Result<Vec<Value>> {
@@ -293,14 +288,13 @@ pub fn shown_artifacts(slug: &str) -> Result<Vec<Value>> {
     Ok(out)
 }
 
-/// Port of `artifacts.read_link`.
 pub fn read_link(path: &Path) -> Value {
     let invalid = || json!({"url": "", "title": "invalid link"});
     let Ok(bytes) = std::fs::read(path) else { return invalid() };
     let Ok(text) = String::from_utf8(bytes) else { return invalid() };
     let Ok(data) = serde_json::from_str::<Value>(&text) else { return invalid() };
     let Some(map) = data.as_object() else { return invalid() };
-    let field = |k: &str| map.get(k).map(am_core::py::str_value).unwrap_or_default();
+    let field = |k: &str| map.get(k).map(am_core::format::text).unwrap_or_default();
     let url = field("url");
     match url_scheme(&url) {
         Ok(s) if s == "http" || s == "https" => {}
@@ -309,7 +303,7 @@ pub fn read_link(path: &Path) -> Value {
     json!({"url": url, "title": field("title"), "description": field("description")})
 }
 
-/// Port of `artifacts.log` (Python's default limit is 200).
+/// The history of a project's artifacts, or of one (callers pass a limit of 200).
 pub fn log(slug: &str, name: Option<&str>, limit: i64) -> Result<Vec<Value>> {
     let name = name.filter(|n| !n.is_empty());
     let path = match name {
@@ -336,7 +330,6 @@ pub fn log(slug: &str, name: Option<&str>, limit: i64) -> Result<Vec<Value>> {
     Ok(entries.into_iter().filter(|e| util::s(e, "subject") != "Start of history").collect())
 }
 
-/// Port of `artifacts.show`.
 pub fn show(slug: &str, name: &str, rev: &str) -> Result<Vec<u8>> {
     match store().show(rev, &git_path(slug, &clean_name(name)?))? {
         Some(data) => Ok(data),
@@ -344,14 +337,13 @@ pub fn show(slug: &str, name: &str, rev: &str) -> Result<Vec<u8>> {
     }
 }
 
-/// Port of `artifacts.has_unpublished_changes`.
 pub fn has_unpublished_changes(slug: &str, name: &str) -> Result<bool> {
     let path = git_path(slug, &clean_name(name)?);
     let done = store().run(&["status", "--porcelain", "--", &path], false, None)?;
-    Ok(!am_core::py::strip(&done.stdout_text()).is_empty())
+    Ok(!am_core::format::strip(&done.stdout_text()).is_empty())
 }
 
-/// Python's strict `mimetypes` map: its defaults, then each of `mimetypes.knownfiles`
+/// The suffix-to-type map: the default table, then each of the known `mime.types` files
 /// that exists (on a Mac, `/etc/apache2/mime.types`), read once.
 fn types_map() -> &'static HashMap<String, String> {
     static MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
@@ -364,7 +356,7 @@ fn types_map() -> &'static HashMap<String, String> {
             }
             let Ok(text) = std::fs::read_to_string(file) else { continue };
             for line in text.split_inclusive('\n') {
-                let mut words: Vec<&str> = line.split(am_core::py::is_space).filter(|w| !w.is_empty()).collect();
+                let mut words: Vec<&str> = line.split(am_core::format::is_space).filter(|w| !w.is_empty()).collect();
                 if let Some(i) = words.iter().position(|w| w.starts_with('#')) {
                     words.truncate(i);
                 }
@@ -379,7 +371,8 @@ fn types_map() -> &'static HashMap<String, String> {
     })
 }
 
-/// `mimetypes.guess_type(url)[0]`, strict.
+/// The type of a URL or path, from its suffix: aliases like `.tgz` are expanded, and a
+/// compressed file gets the type of what's inside. `None` if the suffix isn't known.
 pub fn guess_type(url: &str) -> Option<String> {
     use crate::mime_default::{ENCODINGS, SUFFIXES};
     let mut url = url.to_string();
@@ -418,7 +411,7 @@ pub fn guess_type(url: &str) -> Option<String> {
     types_map().get(&ext.to_lowercase()).cloned()
 }
 
-/// Port of `artifacts.mime_of`: a file's type, from its suffix alone.
+/// A file's type, from its suffix alone.
 pub fn mime_of(path: &str) -> String {
     let suffix = splitext(path).1.to_lowercase();
     if suffix == ".md" || suffix == ".markdown" {
@@ -434,8 +427,8 @@ pub fn mime_of(path: &str) -> String {
     }
 }
 
-/// Port of `artifacts.contained`: `<project>/<area>/<relative>`, if that really is a file
-/// inside the area, with symlinks followed before checking.
+/// `<project>/<area>/<relative>`, if that really is a file inside the area, with symlinks
+/// followed before checking.
 pub fn contained(slug: &str, area: &str, relative: &str) -> Option<PathBuf> {
     let base = resolve(&project_dir(slug)).join(area);
     let target = resolve(&base.join(relative));
@@ -462,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn mime_types_match_python() {
+    fn mime_types_follow_the_table() {
         assert_eq!(mime_of("a.md"), "text/markdown; charset=utf-8");
         assert_eq!(mime_of("a.html"), "text/html; charset=utf-8");
         assert_eq!(mime_of("a.png"), "image/png");

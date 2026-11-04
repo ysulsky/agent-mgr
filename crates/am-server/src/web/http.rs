@@ -1,26 +1,26 @@
-//! The HTTP layer, matching aiohttp where it shows: how a path is decoded and matched,
-//! the bodies and headers of raised HTTP errors (which skip the app's security headers),
-//! `json_response`, and `FileResponse` (ETag, Last-Modified, conditional and range requests).
+//! The HTTP layer: how a path is decoded and matched, the bodies and headers of HTTP
+//! errors (which skip the app's security headers), JSON responses, and file responses
+//! (ETag, Last-Modified, conditional and range requests).
 
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::body::Bytes;
 use std::path::Path;
 
-/// A request, with its path decoded as yarl decodes it.
+/// A request, with its path decoded (see `unquote_path`).
 pub struct Req {
     pub method: String,
-    /// `request.path`: every %XX decoded (as UTF-8 where valid).
+    /// The path with every %XX decoded (as UTF-8 where valid).
     pub path: String,
-    /// `rel_url.path_safe`: decoded except `%2F` and `%25`, which routing keeps.
+    /// The path decoded except `%2F` and `%25`, which routing keeps.
     pub path_safe: String,
     pub query: Vec<(String, String)>,
     /// The method, URI and headers, kept whole for a websocket upgrade.
     pub parts: axum::http::request::Parts,
     pub body: Bytes,
-    /// The body was over `client_max_size`, and wasn't read.
+    /// The body was over `MAX_UPLOAD`, and wasn't read.
     pub too_large: Option<u64>,
-    /// Route parameters, decoded as aiohttp decodes them.
+    /// Route parameters, decoded (`%2F` and `%25` too).
     pub params: Vec<(String, String)>,
 }
 
@@ -33,12 +33,12 @@ impl Req {
         self.parts.headers.get(name).and_then(|v| v.to_str().ok())
     }
 
-    /// `request.host`: the Host header.
+    /// The Host header.
     pub fn host(&self) -> &str {
         self.header("host").unwrap_or("")
     }
 
-    /// `request.query.get(key)`: the first value.
+    /// A query parameter: its first value.
     pub fn query(&self, key: &str) -> Option<&str> {
         self.query.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     }
@@ -47,7 +47,7 @@ impl Req {
         self.params.iter().find(|(k, _)| k == name).map_or("", |(_, v)| v.as_str())
     }
 
-    /// `request.cookies.get(name)`.
+    /// A cookie's value, without the double quotes around a quoted one.
     pub fn cookie(&self, name: &str) -> Option<String> {
         for header in self.parts.headers.get_all("cookie") {
             let Ok(text) = header.to_str() else { continue };
@@ -63,17 +63,17 @@ impl Req {
         None
     }
 
-    /// `request.can_read_body`.
+    /// Whether the request has a body.
     pub fn can_read_body(&self) -> bool {
         !self.body.is_empty() || self.too_large.is_some()
     }
 
-    /// `request.content_length`.
+    /// The Content-Length header, as a number.
     pub fn content_length(&self) -> Option<u64> {
         self.header("content-length").and_then(|v| v.trim().parse().ok())
     }
 
-    /// `await request.json()`.
+    /// The body as JSON: a 413 if it was too large to read, `BadJson` if it isn't JSON.
     pub fn json(&self) -> Result<serde_json::Value, Fail> {
         if let Some(size) = self.too_large {
             return Err(raised(413, Some(&format!("Maximum request body size {} exceeded, actual body size {size}", super::MAX_UPLOAD))));
@@ -82,7 +82,7 @@ impl Req {
         serde_json::from_str(text).map_err(|_| Fail::BadJson)
     }
 
-    /// `await request.json()`, where the handler then calls `.get` on it.
+    /// The body as a JSON object; any other JSON value is a 500.
     pub fn json_object(&self) -> Result<serde_json::Map<String, serde_json::Value>, Fail> {
         match self.json()? {
             serde_json::Value::Object(map) => Ok(map),
@@ -105,11 +105,11 @@ pub struct Resp {
 
 /// Why a handler didn't return a response.
 pub enum Fail {
-    /// A raised `web.HTTPException`: sent as it is, without the security headers.
+    /// An HTTP error or redirect: sent as it is, without the security headers.
     Http(Box<Resp>),
-    /// An `AmError`: `{"error": message}` with status 400.
+    /// An `Error::Am`: `{"error": message}` with status 400.
     Am(String),
-    /// A `json.JSONDecodeError` from reading the body.
+    /// A body that isn't valid JSON.
     BadJson,
     /// Anything else: a 500.
     Internal(String),
@@ -132,7 +132,7 @@ impl From<std::io::Error> for Fail {
 
 pub type Handled = Result<Resp, Fail>;
 
-/// Run a handler, turning a panic (a store function not written yet, say) into a 500.
+/// Run a handler, turning a panic into a 500.
 pub fn catch<T>(f: impl FnOnce() -> Result<T, Fail>) -> Result<T, Fail> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(result) => result,
@@ -149,14 +149,15 @@ impl Resp {
         Resp { status, headers: vec![("Content-Type".into(), content_type.into())], body: RespBody::Bytes(body.into()) }
     }
 
-    /// `web.Response(text=..., content_type="text/html")`.
+    /// An HTML page, as UTF-8.
     pub fn html(status: u16, text: impl Into<String>) -> Self {
         Resp::new(status, "text/html; charset=utf-8", text.into())
     }
 
-    /// `web.json_response(data)`: `json.dumps(data)`, ensure_ascii and all.
+    /// A JSON response: compact (`, ` and `: ` separators), with everything outside
+    /// printable ASCII escaped.
     pub fn json(status: u16, data: &serde_json::Value) -> Self {
-        Resp::new(status, "application/json; charset=utf-8", am_core::json::dumps_ascii(data))
+        Resp::new(status, "application/json; charset=utf-8", am_core::json::encode_ascii(data))
     }
 
     pub fn ok(data: &serde_json::Value) -> Handled {
@@ -203,7 +204,7 @@ impl Resp {
     }
 }
 
-/// `raise web.HTTPxxx(text=...)`: `text/plain; charset=utf-8`, the text or `"<status>: <reason>"`.
+/// An HTTP error: `text/plain; charset=utf-8`, the text or `"<status>: <reason>"`.
 pub fn raised(status: u16, text: Option<&str>) -> Fail {
     Fail::Http(Box::new(raised_resp(status, text)))
 }
@@ -220,12 +221,12 @@ pub fn not_found() -> Fail {
     raised(404, None)
 }
 
-/// `raise web.HTTPFound(location)`.
+/// A 302 redirect to `location`.
 pub fn found(location: &str) -> Fail {
     Fail::Http(Box::new(raised_resp(302, None).with_header("Location", location)))
 }
 
-/// What aiohttp sends for an exception a handler didn't expect.
+/// What's sent for an error a handler didn't expect.
 pub fn internal_error() -> Resp {
     Resp::new(500, "text/plain; charset=utf-8", "500 Internal Server Error\n\nServer got itself in trouble")
 }
@@ -236,9 +237,9 @@ fn hex_value(c: u8) -> Option<u8> {
     (c as char).to_digit(16).map(|d| d as u8)
 }
 
-/// yarl's unquoting of a path. Runs of `%XX` decode as UTF-8; bytes that aren't valid
-/// UTF-8 keep their original text. With `safe`, a decoded `/` or `%` stays encoded, as
-/// `%2F` and `%25` (yarl's `path_safe`).
+/// Decode a path. Runs of `%XX` decode as UTF-8; bytes that aren't valid UTF-8 keep
+/// their original text. With `safe`, a decoded `/` or `%` stays encoded, as `%2F` and
+/// `%25` (the `path_safe` that routes are matched against).
 pub fn unquote_path(raw: &str, safe: bool) -> String {
     let bytes = raw.as_bytes();
     let mut out = String::with_capacity(raw.len());
@@ -303,7 +304,7 @@ pub fn unquote_path(raw: &str, safe: bool) -> String {
     out
 }
 
-/// aiohttp's `_unquote_path_safe`, for a route parameter matched in `path_safe`.
+/// Decode the `%2F` and `%25` left in a route parameter matched in `path_safe`.
 pub fn unquote_param(value: &str) -> String {
     if !value.contains('%') {
         return value.to_string();
@@ -317,7 +318,7 @@ fn unquote_query_part(raw: &str) -> String {
     unquote_path(&spaced, false)
 }
 
-/// yarl's `URL.query`: `&`-separated, blank values kept, `+` as a space.
+/// A query string: `&`-separated, blank values kept, `+` as a space.
 pub fn parse_query(raw: Option<&str>) -> Vec<(String, String)> {
     let Some(raw) = raw.filter(|r| !r.is_empty()) else { return vec![] };
     raw.split('&')
@@ -329,7 +330,8 @@ pub fn parse_query(raw: Option<&str>) -> Vec<(String, String)> {
         .collect()
 }
 
-/// `urllib.parse.quote(text, safe=...)`.
+/// Percent-encode `text` as UTF-8, except letters, digits, `_.-~` and the ASCII
+/// characters in `safe`.
 pub fn quote(text: &str, safe: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for &byte in text.as_bytes() {
@@ -345,7 +347,7 @@ pub fn quote(text: &str, safe: &str) -> String {
 
 // ---------------------------------------------------------------- files
 
-/// An HTTP date (IMF-fixdate), as aiohttp writes Last-Modified.
+/// An HTTP date (IMF-fixdate), as Last-Modified is written.
 pub fn http_date(seconds: i64) -> String {
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -388,7 +390,8 @@ pub fn parse_http_date(text: &str) -> Option<i64> {
     Some(unsafe { libc::timegm(&mut tm) } as i64)
 }
 
-/// The type aiohttp's `FileResponse` guesses from a path's suffix.
+/// A file's Content-Type, from its suffix as it is, then lowercased; else
+/// `application/octet-stream`.
 pub fn guess_file_type(path: &Path) -> &'static str {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let suffix = match name.rfind('.') {
@@ -414,8 +417,9 @@ fn etag_matches(header: &str, etag: &str, weak: bool) -> bool {
     })
 }
 
-/// `web.FileResponse(path, headers=headers)`: the security headers go after `headers`,
-/// as the middleware adds them, then the file's own.
+/// Serve the file at `path`, with `headers` first, then the file's own (Content-Type
+/// unless `headers` has one, Etag, Last-Modified). The middleware adds any security
+/// headers still missing.
 pub fn file_response(req: &Req, path: &Path, headers: Vec<(String, String)>) -> Handled {
     use std::os::unix::fs::MetadataExt;
     let meta = match std::fs::metadata(path) {
@@ -430,7 +434,7 @@ pub fn file_response(req: &Req, path: &Path, headers: Vec<(String, String)>) -> 
     let size = meta.len();
     let etag = format!("{mtime_ns:x}-{size:x}");
     let mtime = meta.mtime() as f64 + meta.mtime_nsec() as f64 * 1e-9;
-    // aiohttp's last_modified setter rounds up to the second.
+    // Last-Modified rounds the mtime up to the second.
     let last_modified = http_date(mtime.ceil() as i64);
     let not_modified = match req.header("if-none-match") {
         Some(header) => etag_matches(header, &etag, true),
@@ -474,8 +478,7 @@ pub fn file_response(req: &Req, path: &Path, headers: Vec<(String, String)>) -> 
     Ok(resp)
 }
 
-/// One `bytes=` range, as aiohttp's `http_range` and `FileResponse` read it: `Ok(None)`
-/// for no range, `Err` for 416, else the start and the count.
+/// One `bytes=` range: `Ok(None)` for no range, `Err` for 416, else the start and the count.
 fn parse_range(header: &str, size: u64) -> Result<Option<(u64, u64)>, ()> {
     let Some(spec) = header.strip_prefix("bytes=") else { return Err(()) };
     let (start, end) = spec.split_once('-').ok_or(())?;
@@ -503,8 +506,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn paths_decode_as_yarl_does() {
-        assert_eq!(unquote_path("/static/%2e%2e/web.py", false), "/static/../web.py");
+    fn paths_decode_utf8_runs_and_keep_the_rest() {
+        assert_eq!(unquote_path("/static/%2e%2e/config.toml", false), "/static/../config.toml");
         assert_eq!(unquote_path("/a/%2Fb/c%20d", true), "/a/%2Fb/c d");
         assert_eq!(unquote_path("/x/..%2f..%2fy", true), "/x/..%2F..%2Fy");
         assert_eq!(unquote_path("/a/%25%2F%2f", false), "/a/%//");
@@ -518,13 +521,13 @@ mod tests {
     }
 
     #[test]
-    fn queries_parse_as_yarl_does() {
+    fn queries_parse() {
         let q = parse_query(Some("q=1+2&token=a%2Bb&e&f=&q=3"));
         assert_eq!(q, vec![("q".into(), "1 2".into()), ("token".into(), "a+b".into()), ("e".into(), "".into()), ("f".into(), "".into()), ("q".into(), "3".into())]);
     }
 
     #[test]
-    fn quote_matches_urllib() {
+    fn quote_escapes_all_but_unreserved_and_safe() {
         assert_eq!(quote("a b/c@d é", "/"), "a%20b/c%40d%20%C3%A9");
         assert_eq!(quote("artifacts@abc", "@"), "artifacts@abc");
     }

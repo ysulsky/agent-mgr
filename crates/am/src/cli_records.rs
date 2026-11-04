@@ -1,6 +1,6 @@
-//! `cli.py`'s tasks, attention, schedules, artifacts and memory commands.
+//! The tasks, attention, schedules, artifacts and memory commands.
 
-use crate::argparse::Namespace;
+use crate::args::Parsed;
 use crate::cli::{ago, author, first, project_of, read_stdin, read_text, say, stdin_is_tty, Out};
 use am_core::{am_err, Result, Value};
 use am_store::util::{get, has, s};
@@ -15,7 +15,7 @@ fn print_task(task: &Value, out: &mut Out) {
     }
 }
 
-pub fn cmd_task(ns: &Namespace, out: &mut Out) -> Result<()> {
+pub fn cmd_task(ns: &Parsed, out: &mut Out) -> Result<()> {
     let slug = project_of(ns)?;
     match ns.str("action").unwrap_or_default() {
         "add" => {
@@ -49,7 +49,7 @@ pub fn cmd_task(ns: &Namespace, out: &mut Out) -> Result<()> {
     Ok(())
 }
 
-pub fn cmd_attention(ns: &Namespace, out: &mut Out) -> Result<()> {
+pub fn cmd_attention(ns: &Parsed, out: &mut Out) -> Result<()> {
     let slug = project_of(ns)?;
     let by = author().filter(|a| !a.is_empty()).unwrap_or("user".into());
     match ns.str("action").unwrap_or_default() {
@@ -91,12 +91,12 @@ pub fn cmd_attention(ns: &Namespace, out: &mut Out) -> Result<()> {
     Ok(())
 }
 
-/// `entry.get('every') or entry.get('cron')`.
+/// When a schedule runs: its `every` if set, else its `cron`.
 fn when(entry: &Value) -> String {
     if has(entry, "every") { s(entry, "every") } else { s(entry, "cron") }
 }
 
-pub fn cmd_schedule(ns: &Namespace, out: &mut Out) -> Result<()> {
+pub fn cmd_schedule(ns: &Parsed, out: &mut Out) -> Result<()> {
     let slug = project_of(ns)?;
     let name = ns.str("name").unwrap_or_default();
     match ns.str("action").unwrap_or_default() {
@@ -128,7 +128,7 @@ pub fn cmd_schedule(ns: &Namespace, out: &mut Out) -> Result<()> {
                 say(out, format!("Paused: {slug} is archived."));
             }
             for (name, entry) in &map {
-                let on = get(entry, "enabled").is_none_or(|v| am_core::py::truthy(Some(v)));
+                let on = get(entry, "enabled").is_none_or(|v| am_core::format::truthy(Some(v)));
                 let prompt = get(entry, "prompt").and_then(Value::as_str).unwrap_or_default();
                 say(out, format!("{name}: {} to {}{}: {}", when(entry), s(entry, "to"), if on { "" } else { " (off)" }, first(prompt, 100)));
             }
@@ -166,7 +166,7 @@ fn print_log(entries: &[Value], out: &mut Out) {
     }
 }
 
-pub fn cmd_artifact(ns: &Namespace, out: &mut Out) -> Result<()> {
+pub fn cmd_artifact(ns: &Parsed, out: &mut Out) -> Result<()> {
     let slug = project_of(ns)?;
     let author = author();
     match ns.str("action").unwrap_or_default() {
@@ -217,7 +217,7 @@ pub fn cmd_artifact(ns: &Namespace, out: &mut Out) -> Result<()> {
     Ok(())
 }
 
-/// `_edit_in_editor`: $EDITOR (else vi) on a temporary `.md` file.
+/// $EDITOR (else vi) on a temporary `.md` file holding `initial`: the edited text.
 fn edit_in_editor(initial: &str) -> Result<String> {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("tmp{}.md", am_core::new_id("e").replace('-', "")));
@@ -233,7 +233,7 @@ fn edit_in_editor(initial: &str) -> Result<String> {
     result
 }
 
-pub fn cmd_memory(ns: &Namespace, out: &mut Out) -> Result<()> {
+pub fn cmd_memory(ns: &Parsed, out: &mut Out) -> Result<()> {
     let name = ns.str("name").unwrap_or_default();
     let author = author();
     match ns.str("action").unwrap_or_default() {

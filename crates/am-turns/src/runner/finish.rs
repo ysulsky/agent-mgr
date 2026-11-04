@@ -1,20 +1,20 @@
-//! Finishing turns, and when turns go wrong (`runner.py`, "finishing turns" and "when
-//! turns go wrong").
+//! Finishing turns, and when turns go wrong.
 
 use super::{as_str, classify_failure, record_usage_totals, Runner, HOLD_AFTER_AUTH_FAILURE, HOLD_AFTER_LIMIT, LOG};
 use crate::backends::{self, StreamResult};
-use crate::{log, prompts, pyv, store};
+use crate::{log, prompts, convert, store};
 use am_core::{excerpt, first_line, now, read_json, turn_dir, write_json, Result, Value, MANAGER};
 use serde_json::json;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-/// `a + n` as Python adds a stored number and an int.
+/// A stored number plus `n`: an integer stays an integer, a float a float, and a bool
+/// counts as 0 or 1. Anything else counts as missing, giving `n`.
 fn add_int(v: Option<&Value>, n: i64) -> Value {
     match v {
         Some(Value::Number(x)) if x.is_i64() => json!(x.as_i64().unwrap() + n),
         Some(Value::Number(x)) if x.is_u64() => json!(x.as_u64().unwrap() as i64 + n),
-        Some(Value::Number(x)) => pyv::float_value(x.as_f64().unwrap_or(0.0) + n as f64),
+        Some(Value::Number(x)) => convert::float_value(x.as_f64().unwrap_or(0.0) + n as f64),
         Some(Value::Bool(b)) => json!(*b as i64 + n),
         _ => json!(n),
     }
@@ -24,7 +24,7 @@ fn messages_of(slug: &str, name: &str, meta: &Value) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     if let Some(Value::Array(ids)) = meta.get("messages") {
         for id in ids {
-            if let Some(m) = store::get_message(slug, name, &pyv::str_of(id))?.filter(|m| am_core::py::truthy(Some(m))) {
+            if let Some(m) = store::get_message(slug, name, &convert::text(id))?.filter(|m| am_core::format::truthy(Some(m))) {
                 out.push(m);
             }
         }
@@ -32,7 +32,7 @@ fn messages_of(slug: &str, name: &str, meta: &Value) -> Result<Vec<Value>> {
     Ok(out)
 }
 
-/// `exit_info.get("code") != 0`.
+/// Whether the exit code isn't 0. A missing or non-numeric code counts as nonzero.
 fn nonzero(code: Option<&Value>) -> bool {
     match code {
         Some(Value::Number(n)) => n.as_f64() != Some(0.0),
@@ -42,8 +42,8 @@ fn nonzero(code: Option<&Value>) -> bool {
 }
 
 fn final_or_no_reply(result: &Value) -> Result<String> {
-    let final_ = pyv::or_str(result.get("final"));
-    let final_ = am_core::py::strip(&final_);
+    let final_ = convert::or_str(result.get("final"));
+    let final_ = am_core::format::strip(&final_);
     if final_.is_empty() {
         prompts::render_kv("messages/no-reply", &[])
     } else {
@@ -70,7 +70,7 @@ impl Runner {
             as_str(meta, "model"),
             Some(&base),
         );
-        let stopped = am_core::py::truthy(exit_info.get("stopped")) || directory.join("interrupt.json").exists();
+        let stopped = am_core::format::truthy(exit_info.get("stopped")) || directory.join("interrupt.json").exists();
         let failed = !stopped && (nonzero(exit_info.get("code")) || parsed.is_error);
         let mut error = String::new();
         if failed {
@@ -79,11 +79,11 @@ impl Runner {
                 error = tail(&directory.join("stderr.log"), 1500);
             }
             if error.is_empty() {
-                error = format!("exit code {}", exit_info.get("code").map_or_else(|| "None".to_string(), pyv::str_of));
+                error = format!("exit code {}", exit_info.get("code").map_or_else(|| "None".to_string(), convert::text));
             }
         }
         let messages = messages_of(slug, name, meta)?;
-        let ended = exit_info.get("ended").filter(|e| am_core::py::truthy(Some(e))).cloned().unwrap_or_else(|| json!(now()));
+        let ended = exit_info.get("ended").filter(|e| am_core::format::truthy(Some(e))).cloned().unwrap_or_else(|| json!(now()));
         let mut result = json!({
             "state": if stopped { "interrupted" } else if failed { "failed" } else { "done" },
             "final": parsed.final_,
@@ -91,7 +91,7 @@ impl Runner {
             "code": exit_info.get("code").cloned().unwrap_or(Value::Null),
             "ended": ended,
             "started": exit_info.get("started").cloned().unwrap_or(Value::Null),
-            "cost_usd": pyv::float_value(parsed.cost_usd),
+            "cost_usd": convert::float_value(parsed.cost_usd),
             "cost_is_estimate": parsed.cost_is_estimate,
             "tokens": parsed.tokens.to_value(),
             "session": parsed.session,
@@ -116,8 +116,8 @@ impl Runner {
         let main = as_str(meta, "kind") == "main";
         let done = as_str(result, "state") == "done";
         store::update_agent(slug, name, |agent| {
-            let cost = agent.get("cost_usd").map_or(0.0, pyv::py_float);
-            agent["cost_usd"] = pyv::float_value(cost + parsed.cost_usd);
+            let cost = agent.get("cost_usd").map_or(0.0, convert::to_float);
+            agent["cost_usd"] = convert::float_value(cost + parsed.cost_usd);
             if parsed.cost_is_estimate {
                 agent["cost_is_estimate"] = json!(true);
             }
@@ -204,7 +204,7 @@ impl Runner {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn note(&self, slug: &str, name: &str, meta: &Value, messages: &[Value], text: &str, result: &Value, state: &str) -> Result<()> {
-        let or = |v: Option<&Value>, fallback: Value| v.filter(|x| am_core::py::truthy(Some(x))).cloned().unwrap_or(fallback);
+        let or = |v: Option<&Value>, fallback: Value| v.filter(|x| am_core::format::truthy(Some(x))).cloned().unwrap_or(fallback);
         let note = json!({
             "id": meta["id"],
             "ts": or(result.get("ended"), json!(now())),
@@ -244,8 +244,8 @@ impl Runner {
         } else if kind == "agent" {
             self.reply_to_agent(slug, name, message, &final_, &format!("m-{short}-p0"))?;
         }
-        let asked_by = if kind == "user" { "The user".to_string() } else { message.get("from").map_or_else(|| "None".into(), pyv::str_of) };
-        let question = message.get("text").map_or_else(String::new, pyv::str_of);
+        let asked_by = if kind == "user" { "The user".to_string() } else { message.get("from").map_or_else(|| "None".into(), convert::text) };
+        let question = message.get("text").map_or_else(String::new, convert::text);
         let text = prompts::render_kv("messages/side-exchange", &[("asked_by", &asked_by), ("question", &question), ("reply", &final_)])?;
         let opts = store::SendOpts {
             sender: "daemon".into(),
@@ -261,12 +261,12 @@ impl Runner {
     }
 
     fn reply_to_agent(&self, slug: &str, name: &str, message: &Value, text: &str, msg_id: &str) -> Result<()> {
-        let sender = message.get("from").map_or_else(String::new, pyv::str_of);
+        let sender = message.get("from").map_or_else(String::new, convert::text);
         let Some((to_slug, to_name)) = sender.split_once('/') else { return Ok(()) };
         if !store::agent_exists(to_slug, to_name) {
             return Ok(());
         }
-        let original = message.get("text").map_or_else(String::new, pyv::str_of);
+        let original = message.get("text").map_or_else(String::new, convert::text);
         let opts = store::SendOpts {
             sender: format!("{slug}/{name}"),
             kind: Some("reply".into()),
@@ -287,14 +287,14 @@ impl Runner {
         let mut unanswered: Vec<String> = Vec::new();
         for m in messages {
             if as_str(m, "kind") == "user" && !store::answered_in_turn(slug, name, as_str(m, "id"), turn_id)? {
-                unanswered.push(pyv::str_of(&m["id"]));
+                unanswered.push(convert::text(&m["id"]));
             }
         }
         let unanswered = unanswered.join(", ");
         let (note, mut line);
-        if let Some(limit) = meta.get("time_limit").filter(|l| am_core::py::truthy(Some(l))) {
-            let text = limit.get("text").map_or_else(|| "None".into(), pyv::str_of);
-            let role = limit.get("role").map_or_else(|| "None".into(), pyv::str_of);
+        if let Some(limit) = meta.get("time_limit").filter(|l| am_core::format::truthy(Some(l))) {
+            let text = limit.get("text").map_or_else(|| "None".into(), convert::text);
+            let role = limit.get("role").map_or_else(|| "None".into(), convert::text);
             let mut values = vec![("turn_id", turn_id), ("limit", text.as_str()), ("role", role.as_str())];
             note = if !unanswered.is_empty() {
                 values.push(("unanswered", &unanswered));
@@ -310,7 +310,7 @@ impl Runner {
             note = prompts::render_kv("notes/interrupted", &[("turn_id", turn_id)])?;
             line = "Interrupted".to_string();
         }
-        if am_core::py::truthy(meta.get("auto_interrupt")) {
+        if am_core::format::truthy(meta.get("auto_interrupt")) {
             // It was set aside for the user's message, so its own messages run again.
             for message in messages {
                 store::requeue(slug, name, as_str(message, "id"), false)?;
@@ -324,7 +324,7 @@ impl Runner {
     }
 
     pub(crate) fn after_failure(&mut self, slug: &str, name: &str, meta: &Value, messages: &[Value], result: &mut Value) -> Result<()> {
-        let error = pyv::or_str(result.get("error"));
+        let error = convert::or_str(result.get("error"));
         let turn_id = as_str(meta, "id");
         if as_str(meta, "kind") == "side" {
             // The message isn't lost: the main turn will take it.
@@ -338,9 +338,9 @@ impl Runner {
         let stderr = tail(&turn_dir(slug, name, turn_id).join("stderr.log"), 1500);
         let kind = classify_failure(&format!("{error}\n{stderr}"));
         let agent = store::get_agent(slug, name)?;
-        let limit = pyv::py_int(self.cfg["runner"].get("max_retries"));
+        let limit = convert::to_int(self.cfg["runner"].get("max_retries"));
         let retries_so_far = agent.get("retries").cloned().unwrap_or(json!(0));
-        let next = pyv::py_int(Some(&retries_so_far)) + 1;
+        let next = convert::to_int(Some(&retries_so_far)) + 1;
         match kind {
             "session" if next <= limit => {
                 let template = if as_str(&agent, "role") == "manager" { "notes/session-lost-manager" } else { "notes/session-lost" };
@@ -402,14 +402,14 @@ impl Runner {
         for message in messages {
             store::requeue(slug, name, as_str(message, "id"), false)?;
         }
-        // Task #6, a fix over Python: the notes this turn carried go back to the agent, as
-        // for a turn that never ran. When the retry needs a new session (a first turn was
-        // interrupted before its CLI created one, say), or the CLI refused the turn, the
-        // agent never read them, and the "was interrupted" note would be lost.
+        // The notes this turn carried go back to the agent, as for a turn that never ran.
+        // When the retry needs a new session (a first turn was interrupted before its CLI
+        // created one, say), or the CLI refused the turn, the agent never read them, and
+        // the "was interrupted" note would be lost.
         let given: Vec<Value> = if as_str(meta, "kind") == "main" { meta.get("notes").and_then(Value::as_array).cloned().unwrap_or_default() } else { vec![] };
         store::update_agent(slug, name, |a| {
             a["retries"] = retries;
-            a["not_before"] = pyv::float_value(now() + delay);
+            a["not_before"] = convert::float_value(now() + delay);
             if !given.is_empty() {
                 let mut merged = given.clone();
                 if let Some(Value::Array(old)) = a.get("notes") {
@@ -446,8 +446,8 @@ impl Runner {
             }
         } else {
             let agent = store::get_agent(slug, name)?;
-            let retries = pyv::py_int(agent.get("retries")) + 1;
-            if retries <= pyv::py_int(self.cfg["runner"].get("max_retries")) {
+            let retries = convert::to_int(agent.get("retries")) + 1;
+            if retries <= convert::to_int(self.cfg["runner"].get("max_retries")) {
                 let note = prompts::render_kv("notes/vanished", &[("turn_id", turn_id)])?;
                 self.retry(slug, name, meta, &messages, json!(retries), 0.0, Some(&note), &mut result, false, false, None)?;
                 result["state"] = json!("vanished");
@@ -465,13 +465,13 @@ impl Runner {
     }
 }
 
-/// `agent.setdefault("notes", []).append(note)`.
+/// Append `note` to the agent's `notes`, starting the array if there isn't one.
 fn push_note(agent: &mut Value, note: &str) {
     if !agent.get("notes").is_some_and(Value::is_array) {
         if agent.get("notes").is_none() {
             agent["notes"] = json!([]);
         } else {
-            return; // Python would fail on a non-list; leave it.
+            return; // Leave a non-array as it is.
         }
     }
     if let Some(Value::Array(notes)) = agent.get_mut("notes") {
@@ -490,7 +490,7 @@ fn tail(path: &Path, limit: u64) -> String {
     if f.read_to_end(&mut data).is_err() {
         return String::new();
     }
-    am_core::py::strip(&String::from_utf8_lossy(&data)).to_string()
+    am_core::format::strip(&String::from_utf8_lossy(&data)).to_string()
 }
 
 /// If only the supervisor died, the agent may still be running. After a reboot the pid
@@ -499,7 +499,7 @@ fn kill_orphan(directory: &Path) {
     let Some(pid) = read_json(&directory.join("pid.json")).ok().flatten() else { return };
     let Some(child) = pid.get("child").and_then(Value::as_i64).filter(|c| *c != 0) else { return };
     let spec = read_json(&directory.join("cmd.json")).ok().flatten().unwrap_or(json!({}));
-    let argv0 = spec.get("argv").and_then(|a| a.get(0)).map_or_else(String::new, pyv::str_of);
+    let argv0 = spec.get("argv").and_then(|a| a.get(0)).map_or_else(String::new, convert::text);
     let program = Path::new(&argv0).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let Ok(out) = std::process::Command::new("ps").args(["-o", "command=", "-p", &child.to_string()]).output() else { return };
     let command = String::from_utf8_lossy(&out.stdout);

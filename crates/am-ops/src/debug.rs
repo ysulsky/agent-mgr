@@ -1,10 +1,10 @@
-//! The am-ops bodies of `am __debug ...` (see crates/am/src/debug.rs and
-//! src/am/_debug.py). Storage's are here; health's (check-logins, mark-checking,
-//! check-resources) belong beside them.
+//! The am-ops bodies of `am __debug ...`, the test hooks for end-to-end tests (see
+//! crates/am/src/debug.rs): storage's, and health's check-logins, mark-checking and
+//! check-resources.
 
 use crate::{health, storage};
 
-/// A JSON list of names, as `json.loads` gives it (`null` for none).
+/// A JSON array of names (`null` for none).
 fn names(text: &str) -> am_core::Result<Option<Vec<String>>> {
     let v: serde_json::Value = serde_json::from_str(text)?;
     Ok(v.as_array().map(|a| a.iter().filter_map(|n| n.as_str().map(String::from)).collect()))
@@ -19,7 +19,7 @@ pub fn run(command: &str, args: &[String]) -> Option<i32> {
             0
         }),
         "storage-status" => storage::status(None).map(|status| {
-            println!("{}", am_core::json::dumps_with(&status, Some(1), true));
+            println!("{}", am_core::json::encode_with(&status, Some(1), true));
             0
         }),
         "connect-command" => Ok(match storage::connect_command(arg(0)) {
@@ -29,7 +29,7 @@ pub fn run(command: &str, args: &[String]) -> Option<i32> {
             }
             None => 1,
         }),
-        // check-logins [NAMES_JSON [FIXED_JSON]]: health.check_logins(cfg, names, fixed).
+        // check-logins [NAMES_JSON [FIXED_JSON]]: `health::check_logins(cfg, names, fixed)`.
         "check-logins" => (|| {
             let chosen = if args.is_empty() { None } else { names(arg(0))? };
             let fixed = if args.len() > 1 { names(arg(1))?.unwrap_or_default() } else { vec![] };

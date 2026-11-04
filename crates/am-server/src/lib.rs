@@ -2,11 +2,10 @@
 //!
 //! - `daemon`: `am daemon start|stop|restart|status`, the `daemon/lock` flock, `daemon/pid`,
 //!   `web.json`, the `daemon/wake` FIFO, and the runner, scheduler and health loops on tokio.
-//!   The daemon process itself is `am daemon __run`, so its command line matches
-//!   `\bam[. ]daemon\b` like Python's `python -m am.daemon`, and either implementation's
-//!   `am daemon stop` stops the other's daemon.
-//! - `web`: every route in `web.py`'s `create_app`, with the same JSON, the same headers
-//!   and the same SSE events and websocket frames, serving `assets::webui_dir()` unchanged.
+//!   The daemon process itself is `am daemon __run`, so `am daemon stop` can recognize it
+//!   by its command line (`\bam daemon\b`).
+//! - `web`: the web server: the JSON API, SSE events, terminal websockets, artifacts, and
+//!   the UI's files from `assets::webui_dir()`, served as they are.
 //! - `deps`: the calls into `am-turns` and `am-ops`, in one place.
 
 pub mod daemon;

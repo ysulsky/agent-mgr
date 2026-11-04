@@ -1,7 +1,9 @@
-//! Python's `logging`, as Agent Mgr uses it. The daemon calls `configure()`, which is
-//! `logging.basicConfig(level=INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")`
-//! to stderr (its `daemon.log`). Anywhere else, as with Python's last-resort handler,
-//! warnings and errors go to stderr as the bare message and info is dropped.
+//! Log messages. The daemon calls `configure()`, and from then on every message goes to
+//! stderr (its `daemon.log`) as `<time> <logger> <LEVEL> <message>`, for example
+//! `2026-11-03 23:58:31,235 am.health WARNING login check failed: gh`: local time with
+//! milliseconds after a comma, the logger's name, `INFO`, `WARNING` or `ERROR`, and the
+//! message. Anywhere else, warnings and errors go to stderr as the bare message and info is
+//! dropped.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +18,7 @@ pub fn is_configured() -> bool {
     CONFIGURED.load(Ordering::SeqCst)
 }
 
-/// `%(asctime)s`: local time as `2026-11-03 23:58:31,235`.
+/// A log line's time: local time as `2026-11-03 23:58:31,235`.
 pub fn asctime() -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let secs = now.as_secs() as libc::time_t;
@@ -57,8 +59,7 @@ pub fn error(name: &str, message: &str) {
     emit(name, "ERROR", message);
 }
 
-/// `log.exception(message)`: the message, then what went wrong (Python prints the
-/// traceback there).
+/// An error and its cause: the message, then on the next line what went wrong.
 pub fn exception(name: &str, message: &str, error: &dyn std::fmt::Display) {
     emit(name, "ERROR", &format!("{message}\n{error}"));
 }

@@ -6,7 +6,7 @@
 //! is part of the instructions, but leaving it out of the fingerprint keeps a process
 //! alive across memory edits; each turn is told what changed instead.
 
-use crate::{pyv, sys};
+use crate::{convert, sys};
 use am_core::{agent_dir, fsx::listdir, new_id, now, read_json, write_json, Result, Value};
 use am_store::memory;
 use serde_json::json;
@@ -24,9 +24,9 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A supervisor runs the code it started with, so a new version replaces it. Python's is
-/// a hash of `proc.py`; this is one of `proc.rs`, so neither runner hands a turn to the
-/// other's process, and a switch replaces idle processes at their next turn.
+/// A supervisor runs the code it started with, so a new version replaces it. The version
+/// is a hash of `proc.rs` and part of the fingerprint, so a change to the supervisor
+/// replaces idle processes at their next turn.
 pub fn supervisor_version() -> String {
     hex(&Sha256::digest(include_bytes!("proc.rs")))[..12].to_string()
 }
@@ -36,7 +36,7 @@ pub fn procs_dir(slug: &str, name: &str) -> PathBuf {
 }
 
 fn read(path: &Path) -> Value {
-    read_json(path).ok().flatten().filter(|v| am_core::py::truthy(Some(v))).unwrap_or_else(|| json!({}))
+    read_json(path).ok().flatten().filter(|v| am_core::format::truthy(Some(v))).unwrap_or_else(|| json!({}))
 }
 
 /// The supervisor holds this lock for as long as it lives.
@@ -44,7 +44,7 @@ pub fn alive(directory: &Path) -> bool {
     if !directory.join("pid.json").exists() && !directory.join("exit.json").exists() {
         // Still starting: the supervisor takes the lock before writing pid.json.
         let meta = read(&directory.join("cmd.json"));
-        return now() - pyv::py_float_or0(meta.get("created")) < 20.0;
+        return now() - convert::to_float_or0(meta.get("created")) < 20.0;
     }
     sys::try_lock(&directory.join("alive.lock")).is_none()
 }
@@ -82,10 +82,10 @@ pub fn is_idle(directory: &Path) -> bool {
 
 pub fn last_activity(directory: &Path) -> f64 {
     let state = read(&directory.join("state.json"));
-    if am_core::py::truthy(state.get("last_activity")) {
-        return pyv::py_float(&state["last_activity"]);
+    if am_core::format::truthy(state.get("last_activity")) {
+        return convert::to_float(&state["last_activity"]);
     }
-    pyv::py_float_or0(read(&directory.join("cmd.json")).get("created"))
+    convert::to_float_or0(read(&directory.join("cmd.json")).get("created"))
 }
 
 /// What a live process must match to take a turn. `argv` minus its session flags and
@@ -104,7 +104,7 @@ pub fn fingerprint(backend: &str, model: &str, session: Option<&str>, argv: &[St
         }
         rest.push(arg);
     }
-    let data = sys::dumps_ascii(&json!([supervisor_version(), backend, model, session, rest, instructions]));
+    let data = sys::encode_ascii(&json!([supervisor_version(), backend, model, session, rest, instructions]));
     hex(&Sha256::digest(data.as_bytes()))[..16].to_string()
 }
 
@@ -114,7 +114,7 @@ pub fn find(slug: &str, name: &str, fp: &str) -> Result<Option<PathBuf>> {
     let mut found = None;
     for directory in live(slug, name) {
         let spec = read(&directory.join("cmd.json"));
-        if directory.join("shutdown.json").exists() || am_core::py::truthy(read(&directory.join("state.json")).get("closing")) {
+        if directory.join("shutdown.json").exists() || am_core::format::truthy(read(&directory.join("state.json")).get("closing")) {
             continue;
         }
         if spec.get("fingerprint").and_then(Value::as_str) == Some(fp) && found.is_none() && is_idle(&directory) {
@@ -143,7 +143,7 @@ pub fn shutdown_all(slug: &str, name: &str, reason: &str) -> Result<()> {
 }
 
 /// The binary to run supervisors with: this one, with symlinks resolved, so a supervisor
-/// is this exact install even if `~/.local/bin/am` is repointed to another implementation.
+/// is this exact install even if `~/.local/bin/am` is repointed to another one.
 pub fn am_binary() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("am"));
     exe.canonicalize().unwrap_or(exe)
@@ -167,8 +167,8 @@ pub fn start(
     let directory = procs_dir(slug, name).join(&proc_id);
     fs::create_dir_all(directory.join("queue"))?;
     let runner_cfg = &cfg["runner"];
-    let idle = if am_core::py::truthy(runner_cfg.get("process_idle")) { pyv::str_of(&runner_cfg["process_idle"]) } else { "55m".into() };
-    let idle_seconds = if idle != "0" && idle != "off" { pyv::float_value(am_core::parse_duration(&idle)?) } else { json!(0) };
+    let idle = if am_core::format::truthy(runner_cfg.get("process_idle")) { convert::text(&runner_cfg["process_idle"]) } else { "55m".into() };
+    let idle_seconds = if idle != "0" && idle != "off" { convert::float_value(am_core::parse_duration(&idle)?) } else { json!(0) };
     write_json(
         &directory.join("cmd.json"),
         &json!({
@@ -222,8 +222,8 @@ pub fn memory_changes(directory: &Path) -> Result<String> {
     write_json(&directory.join("memory.json"), &current)?;
     let mut summaries = BTreeMap::new();
     for e in memory::list_entries()? {
-        let summary: String = pyv::str_of(&e["summary"]).chars().take(120).collect();
-        summaries.insert(pyv::str_of(&e["name"]), summary);
+        let summary: String = convert::text(&e["summary"]).chars().take(120).collect();
+        summaries.insert(convert::text(&e["name"]), summary);
     }
     let mut parts = Vec::new();
     if !added.is_empty() {

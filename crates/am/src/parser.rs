@@ -1,12 +1,13 @@
-//! `cli._build_parser`: every subcommand, option and help string, in Python's order.
+//! The `am` command tree: every subcommand, option and help string, in the order usage
+//! and help list them.
 
-use crate::argparse::{flag, opt, pos, Nargs, Parser, V};
+use crate::args::{flag, opt, pos, Nargs, Parser, V};
 
 fn p(help_prog: &str) -> Parser {
     Parser::new(help_prog, None)
 }
 
-/// `_text_args`.
+/// The text of a message or entry: words, `-` for stdin, or `-f FILE`.
 fn text_args(parser: Parser) -> Parser {
     parser
         .arg(pos("text").nargs(Nargs::ZeroOrMore).help("the text, or - to read stdin"))

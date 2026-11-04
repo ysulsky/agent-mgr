@@ -26,8 +26,8 @@
 //! Files in the proc dir: `cmd.json` (from the runner), `alive.lock`, `pid.json`,
 //! `stream.jsonl`, `stderr.log`, `queue/`, `current.json` (the open turn), `state.json`,
 //! `memory.json` (written by the runner), `shutdown.json` (a request from the runner),
-//! `strays/` (rounds the CLI ran with no turn open) and `exit.json`. All in the format
-//! Python's `am.proc` writes, so each implementation's runner can use the other's process.
+//! `strays/` (rounds the CLI ran with no turn open) and `exit.json`. A runner reads these
+//! files, not the supervisor's memory, so it can use a process it didn't start.
 
 use crate::sys;
 use am_core::{Result, Value};
@@ -42,13 +42,13 @@ const POLL: Duration = Duration::from_millis(50);
 /// After a task finishes, the CLI starts its own round for it within a moment.
 const WAKE_WAIT_SECONDS: f64 = 15.0;
 
-/// `proc.message_uuid`: the uuid a turn's message carries, so its lifecycle events and
-/// replay can be told from another's.
+/// The uuid a turn's message carries, so its lifecycle events and replay can be told
+/// from another's.
 pub fn message_uuid(turn_id: &str) -> String {
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, format!("am-turn:{turn_id}").as_bytes()).to_string()
 }
 
-/// `proc.Turn`: the turn the agent has open.
+/// The turn the agent has open.
 pub struct Turn {
     pub id: String,
     pub dir: PathBuf,
@@ -66,7 +66,7 @@ pub struct Turn {
     kill_sent: f64,
 }
 
-/// `proc.Supervisor`.
+/// The supervisor of one long-lived agent process.
 pub struct Supervisor {
     dir: PathBuf,
     spec: Value,
@@ -95,7 +95,7 @@ pub struct Supervisor {
     stray_count: u32,
 }
 
-/// `proc.supervise`.
+/// Supervise the process in `directory`: 75 if another supervisor owns it, else 0.
 pub fn supervise(directory: &Path) -> Result<i64> {
     Supervisor::new(directory)?.run()
 }
@@ -139,7 +139,7 @@ impl Supervisor {
 
     // ------------------------------------------------------------ running
 
-    /// `Supervisor.run`: 75 if another supervisor owns the process, else 0.
+    /// Run the process to its end: 75 if another supervisor owns the process, else 0.
     pub fn run(mut self) -> Result<i64> {
         let Some(_lock) = sys::try_lock(&self.dir.join("alive.lock")) else {
             return Ok(75); // Another supervisor owns this process.
@@ -274,7 +274,7 @@ impl Supervisor {
             lines.push(std::mem::take(&mut self.partial));
         }
         for raw in lines {
-            // bytes.strip(): ASCII space, \t, \n, \r, \v and \f.
+            // Skip blank lines: only ASCII space, \t, \n, \r, \v and \f.
             if !raw.iter().all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)) {
                 self.handle(&raw);
             }
@@ -317,7 +317,7 @@ impl Supervisor {
                     turn.command_done = true;
                 }
             }
-        } else if kind == "user" && am_core::py::truthy(obj.get("isReplay")) {
+        } else if kind == "user" && am_core::format::truthy(obj.get("isReplay")) {
             self.markers = true;
             if let Some(turn) = &mut self.turn {
                 if obj.get("uuid").and_then(Value::as_str) == Some(turn.uuid.as_str()) {
@@ -329,8 +329,8 @@ impl Supervisor {
             let markers = self.markers;
             if let Some(turn) = &mut self.turn {
                 let text = obj.get("result").and_then(Value::as_str).unwrap_or("");
-                let is_error = am_core::py::truthy(obj.get("is_error"));
-                if !am_core::py::strip(text).is_empty() || is_error {
+                let is_error = am_core::format::truthy(obj.get("is_error"));
+                if !am_core::format::strip(text).is_empty() || is_error {
                     turn.error = is_error;
                 }
                 // Without markers, the first result after the message is the turn's.
@@ -452,7 +452,7 @@ impl Supervisor {
 
     fn send(&mut self, obj: &Value) {
         if let Some(stdin) = &mut self.stdin {
-            let mut line = sys::dumps_ascii(obj);
+            let mut line = sys::encode_ascii(obj);
             line.push('\n');
             // The agent is gone if this fails; its exit closes the turn.
             let _ = stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush());
@@ -601,9 +601,9 @@ impl Supervisor {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn message_uuid_matches_python() {
-        // uuid.uuid5(uuid.NAMESPACE_URL, "am-turn:t-0mh3k2x9a7f3q")
-        assert_eq!(super::message_uuid("t-0mh3k2x9a7f3q"), PYTHON_UUID);
+    fn message_uuid_is_stable() {
+        // The v5 uuid of "am-turn:t-0mh3k2x9a7f3q" in the URL namespace.
+        assert_eq!(super::message_uuid("t-0mh3k2x9a7f3q"), EXPECTED_UUID);
     }
-    const PYTHON_UUID: &str = "c5a9bbb8-11b4-534e-ac26-39b9bbbe9d97";
+    const EXPECTED_UUID: &str = "c5a9bbb8-11b4-534e-ac26-39b9bbbe9d97";
 }

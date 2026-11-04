@@ -19,19 +19,19 @@ use std::sync::Mutex;
 /// Kinds a busy worker answers right away on a side turn.
 pub const SIDE_TURN_KINDS: [&str; 2] = ["user", "agent"];
 
-/// The keyword arguments of `mail.send`, with Python's defaults (`Default`).
+/// The options of [`send`], with their defaults (`Default`).
 #[derive(Clone, Debug)]
 pub struct SendOpts {
-    /// `sender="user"`
+    /// "user" by default.
     pub sender: String,
-    /// `kind=None`: "user" from the user, else "agent".
+    /// `None` means "user" from the user, else "agent".
     pub kind: Option<String>,
-    /// `attachments=None` (a list of dicts).
+    /// Attachment records (objects); `None` for none.
     pub attachments: Option<Vec<Value>>,
     pub reply_to: Option<Value>,
     pub comment: Option<Value>,
     pub interrupt: bool,
-    /// `wake=True`
+    /// `true` by default.
     pub wake: bool,
     pub no_side: bool,
     pub msg_id: Option<String>,
@@ -58,13 +58,13 @@ impl Default for SendOpts {
 }
 
 impl SendOpts {
-    /// `sender=...`, everything else default.
+    /// The given sender, everything else default.
     pub fn from(sender: impl Into<String>) -> Self {
         SendOpts { sender: sender.into(), ..Default::default() }
     }
 }
 
-/// Port of `mail.send`.
+/// Deliver a message to an agent's inbox.
 pub fn send(slug: &str, name: &str, text: &str, opts: SendOpts) -> Result<Value> {
     let agent = projects::get_agent(slug, name)?;
     if has(&agent, "retired") && !opts.allow_retired {
@@ -73,7 +73,7 @@ pub fn send(slug: &str, name: &str, text: &str, opts: SendOpts) -> Result<Value>
     let kind = opts.kind.clone().unwrap_or_else(|| if opts.sender == "user" { "user".into() } else { "agent".into() });
     let msg_id = opts.msg_id.clone().filter(|m| !m.is_empty()).unwrap_or_else(|| new_id("m"));
     let attachments = opts.attachments.clone().unwrap_or_default();
-    let meta = opts.meta.clone().filter(|m| am_core::py::truthy(Some(m))).unwrap_or_else(util::empty);
+    let meta = opts.meta.clone().filter(|m| am_core::format::truthy(Some(m))).unwrap_or_else(util::empty);
     let message = json!({
         "id": msg_id,
         "project": slug,
@@ -101,8 +101,7 @@ pub fn send(slug: &str, name: &str, text: &str, opts: SendOpts) -> Result<Value>
     Ok(message)
 }
 
-/// `mail._copy_to_manager`: the user may talk to any agent; the worker's manager gets an
-/// FYI copy.
+/// The user may talk to any agent; the worker's manager gets an FYI copy.
 fn copy_to_manager(slug: &str, worker: &str, message: &Value) -> Result<()> {
     let id = util::s(message, "id");
     send(
@@ -121,28 +120,27 @@ fn copy_to_manager(slug: &str, worker: &str, message: &Value) -> Result<()> {
     Ok(())
 }
 
-/// `mail._exists`.
 fn message_exists(slug: &str, name: &str, msg_id: &str) -> bool {
     util::exists(&inbox_dir(slug, name).join(format!("{msg_id}.json")))
         || util::exists(&delivered_dir(slug, name).join(format!("{msg_id}.json")))
 }
 
-/// `m.get("ts", 0)` as a number for sorting.
+/// A message's `ts` as a number for sorting, 0 if missing.
 fn ts_of(m: &Value) -> f64 {
     util::num(get(m, "ts")).unwrap_or(0.0)
 }
 
-/// Port of `mail.pending`: inbox messages, interrupting ones first, then oldest first.
+/// Inbox messages, interrupting ones first, then oldest first.
 pub fn pending(slug: &str, name: &str) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     for mid in list_json_ids(&inbox_dir(slug, name))? {
         if let Some(message) = read_json(&inbox_dir(slug, name).join(format!("{mid}.json")))? {
-            if am_core::py::truthy(Some(&message)) {
+            if am_core::format::truthy(Some(&message)) {
                 out.push(message);
             }
         }
     }
-    // A stable sort, as Python's.
+    // A stable sort, so equal keys keep their order.
     out.sort_by(|a, b| {
         let key = |m: &Value| (!has(m, "interrupt"), ts_of(m));
         let (ka, kb) = (key(a), key(b));
@@ -158,7 +156,6 @@ fn unlink_if_there(path: &Path) -> Result<()> {
     }
 }
 
-/// Port of `mail.claim`.
 pub fn claim(slug: &str, name: &str, msg_id: &str, turn_id: &str) -> Result<Option<Value>> {
     let src = inbox_dir(slug, name).join(format!("{msg_id}.json"));
     let Some(mut message) = read_json(&src)? else { return Ok(None) };
@@ -170,8 +167,8 @@ pub fn claim(slug: &str, name: &str, msg_id: &str, turn_id: &str) -> Result<Opti
     Ok(Some(message))
 }
 
-/// Port of `mail.requeue(slug, name, msg_id, **changes)`: move a claimed message back to
-/// the inbox, for a retry. `changes` is a dict (or null for none).
+/// Move a claimed message back to the inbox, for a retry. `changes` is an object of
+/// fields to set (or null for none).
 pub fn requeue(slug: &str, name: &str, msg_id: &str, changes: &Value) -> Result<()> {
     let src = delivered_dir(slug, name).join(format!("{msg_id}.json"));
     let Some(mut message) = read_json(&src)? else { return Ok(()) };
@@ -183,8 +180,7 @@ pub fn requeue(slug: &str, name: &str, msg_id: &str, changes: &Value) -> Result<
     unlink_if_there(&src)
 }
 
-/// Port of `mail.mark_interrupt`: upgrade a queued message so it interrupts the running
-/// main turn.
+/// Upgrade a queued message so it interrupts the running main turn.
 pub fn mark_interrupt(slug: &str, name: &str, msg_id: &str) -> Result<bool> {
     check_item_id(msg_id)?;
     let path = inbox_dir(slug, name).join(format!("{msg_id}.json"));
@@ -195,8 +191,8 @@ pub fn mark_interrupt(slug: &str, name: &str, msg_id: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Port of `mail.answer_target`: the user's message a turn's final reply answers, the
-/// newest of them (the first, of equally new ones).
+/// The user's message a turn's final reply answers: the newest of them (the first, of
+/// equally new ones).
 pub fn answer_target(messages: &[Value]) -> Option<Value> {
     let mut best: Option<&Value> = None;
     for m in messages.iter().filter(|m| get(m, "kind").and_then(Value::as_str) == Some("user")) {
@@ -207,11 +203,10 @@ pub fn answer_target(messages: &[Value]) -> Option<Value> {
     best.cloned()
 }
 
-/// Port of `mail.get_message`.
 pub fn get_message(slug: &str, name: &str, msg_id: &str) -> Result<Option<Value>> {
     check_item_id(msg_id)?;
     let delivered = read_json(&delivered_dir(slug, name).join(format!("{msg_id}.json")))?;
-    if am_core::py::truthy(delivered.as_ref()) {
+    if am_core::format::truthy(delivered.as_ref()) {
         return Ok(delivered);
     }
     read_json(&inbox_dir(slug, name).join(format!("{msg_id}.json")))
@@ -219,8 +214,8 @@ pub fn get_message(slug: &str, name: &str, msg_id: &str) -> Result<Option<Value>
 
 // ---------------------------------------------------------------- answers
 
-/// The versions in an answer directory, as `int(n[1:-5])` of each `v*.json`. `None` for a
-/// missing directory; an error, as Python's ValueError, for a name `int` refuses.
+/// The versions in an answer directory: the number in each `v<N>.json`. `None` for a
+/// missing directory; an error for a `v*.json` whose middle isn't an integer.
 fn version_numbers(directory: &Path) -> Result<Option<Vec<i64>>> {
     let names = match std::fs::read_dir(directory) {
         Ok(_) => am_core::fsx::listdir(directory)?,
@@ -231,16 +226,15 @@ fn version_numbers(directory: &Path) -> Result<Option<Vec<i64>>> {
     for n in names {
         if n.starts_with('v') && n.ends_with(".json") {
             let inner = if n.len() >= 6 { &n[1..n.len() - 5] } else { "" };
-            match am_core::py::parse_int(inner) {
+            match am_core::format::parse_int(inner) {
                 Some(v) => out.push(v),
-                None => return util::crash(format!("invalid literal for int() with base 10: {}", util::repr(inner))),
+                None => return util::crash(format!("invalid literal for int() with base 10: {}", util::quote(inner))),
             }
         }
     }
     Ok(Some(out))
 }
 
-/// Port of `mail.answer_versions`.
 pub fn answer_versions(slug: &str, name: &str, question: &str) -> Result<Vec<Value>> {
     let directory = answers_dir(slug, name).join(question);
     let Some(mut versions) = version_numbers(&directory)? else { return Ok(vec![]) };
@@ -248,14 +242,12 @@ pub fn answer_versions(slug: &str, name: &str, question: &str) -> Result<Vec<Val
     versions.iter().map(|v| Ok(read_json(&directory.join(format!("v{v}.json")))?.unwrap_or(Value::Null))).collect()
 }
 
-/// Port of `mail.latest_answer_version`.
 pub fn latest_answer_version(slug: &str, name: &str, question: &str) -> Result<i64> {
     let directory = answers_dir(slug, name).join(question);
     Ok(version_numbers(&directory)?.and_then(|v| v.into_iter().max()).unwrap_or(0))
 }
 
-/// Port of `mail.publish_answer`: publish the next version of the answer to a user's
-/// question.
+/// Publish the next version of the answer to a user's question.
 pub fn publish_answer(slug: &str, name: &str, question: &str, text: &str, turn: Option<&str>) -> Result<Value> {
     let question = question.split('@').next().unwrap_or_default();
     let Some(message) = get_message(slug, name, question)? else {
@@ -264,10 +256,10 @@ pub fn publish_answer(slug: &str, name: &str, question: &str, text: &str, turn: 
     if get(&message, "kind").and_then(Value::as_str) != Some("user") {
         return am_err(format!(
             "{question} is a {} message, not a question from the user",
-            am_core::py::str_of(get(&message, "kind"))?
+            am_core::format::text_of(get(&message, "kind"))?
         ));
     }
-    if am_core::py::strip(text).is_empty() {
+    if am_core::format::strip(text).is_empty() {
         return am_err("an answer cannot be empty");
     }
     let directory = answers_dir(slug, name).join(question);
@@ -290,22 +282,20 @@ pub fn publish_answer(slug: &str, name: &str, question: &str, text: &str, turn: 
     Ok(answer)
 }
 
-/// Port of `mail.answered_in_turn`.
 pub fn answered_in_turn(slug: &str, name: &str, question: &str, turn: &str) -> Result<bool> {
     Ok(answer_versions(slug, name, question)?.iter().any(|a| get(a, "turn").and_then(Value::as_str) == Some(turn)))
 }
 
 // ---------------------------------------------------------------- reading items
 
-/// Port of `mail.write_note`.
 pub fn write_note(slug: &str, name: &str, turn_id: &str, note: &Value) -> Result<()> {
     write_json(&agent_dir(slug, name).join("notes").join(format!("{turn_id}.json")), note)?;
     poke(slug);
     Ok(())
 }
 
-/// Port of `mail.find_item`: a message `m-...`, answer version `m-...@v2`, note or turn
-/// `t-...`, or attention item `a-...`. Searches `slug` first, then every project.
+/// Look up a message `m-...`, answer version `m-...@v2`, note or turn `t-...`, or
+/// attention item `a-...`. Searches `slug` first, then every project.
 pub fn find_item(item_id: &str, slug: Option<&str>) -> Result<Option<Value>> {
     let base = item_id.split_once('@').map_or(item_id, |p| p.0);
     if !am_core::is_item_id(base) {
@@ -318,7 +308,7 @@ pub fn find_item(item_id: &str, slug: Option<&str>) -> Result<Option<Value>> {
     };
     for project in candidates {
         if let Some(found) = find_in_project(item_id, &project)? {
-            if am_core::py::truthy(Some(&found)) {
+            if am_core::format::truthy(Some(&found)) {
                 return Ok(Some(found));
             }
         }
@@ -329,7 +319,7 @@ pub fn find_item(item_id: &str, slug: Option<&str>) -> Result<Option<Value>> {
 fn find_in_project(item_id: &str, slug: &str) -> Result<Option<Value>> {
     if item_id.starts_with("a-") {
         let item = read_json(&project_dir(slug).join("attention").join(format!("{item_id}.json")))?;
-        let Some(item) = item.filter(|i| am_core::py::truthy(Some(i))) else { return Ok(None) };
+        let Some(item) = item.filter(|i| am_core::format::truthy(Some(i))) else { return Ok(None) };
         let mut merged = Map::new();
         merged.insert("type".into(), "attention".into());
         merged.insert("project".into(), slug.into());
@@ -347,9 +337,9 @@ fn find_in_project(item_id: &str, slug: &str) -> Result<Option<Value>> {
         if base.starts_with("t-") {
             let note = read_json(&agent_dir(slug, &name).join("notes").join(format!("{base}.json")))?;
             let meta = read_json(&turn_dir(slug, &name, base).join("meta.json"))?;
-            if am_core::py::truthy(note.as_ref()) || am_core::py::truthy(meta.as_ref()) {
+            if am_core::format::truthy(note.as_ref()) || am_core::format::truthy(meta.as_ref()) {
                 let result = read_json(&turn_dir(slug, &name, base).join("result.json"))?
-                    .filter(|r| am_core::py::truthy(Some(r)))
+                    .filter(|r| am_core::format::truthy(Some(r)))
                     .unwrap_or_else(util::empty);
                 return Ok(Some(json!({
                     "type": "turn",
@@ -367,7 +357,7 @@ fn find_in_project(item_id: &str, slug: &str) -> Result<Option<Value>> {
         let answers = answer_versions(slug, &name, base)?;
         if !version.is_empty() {
             let wanted = version.trim_start_matches('v');
-            let Some(answer) = answers.iter().find(|a| am_core::py::str_of(get(a, "version")).ok().as_deref() == Some(wanted))
+            let Some(answer) = answers.iter().find(|a| am_core::format::text_of(get(a, "version")).ok().as_deref() == Some(wanted))
             else {
                 return Ok(None);
             };
@@ -390,17 +380,17 @@ fn find_in_project(item_id: &str, slug: &str) -> Result<Option<Value>> {
     Ok(None)
 }
 
-/// `item[key]` as an f-string prints it.
+/// A field as text (`util::s`).
 fn sv(v: &Value, key: &str) -> String {
     util::s(v, key)
 }
 
-/// A text field `"\n".join` would take: a string, else Python's TypeError.
+/// A text field, for joining into lines: a string, else an error.
 fn text_field(v: &Value, key: &str) -> Result<String> {
     match get(v, key) {
         Some(Value::String(s)) => Ok(s.clone()),
         Some(other) => util::crash(format!("sequence item: expected str instance, {} found", type_name(other))),
-        None => util::crash(format!("KeyError: {}", util::repr(key))),
+        None => util::crash(format!("KeyError: {}", util::quote(key))),
     }
 }
 
@@ -416,7 +406,7 @@ fn type_name(v: &Value) -> &'static str {
     }
 }
 
-/// Port of `mail.render_item`: plain text for `am show`.
+/// Plain text for `am show`.
 pub fn render_item(item: &Value) -> Result<String> {
     let kind = get(item, "type").and_then(Value::as_str).unwrap_or_default();
     match kind {
@@ -458,7 +448,7 @@ pub fn render_item(item: &Value) -> Result<String> {
             if let Some(Value::Array(attachments)) = get(message, "attachments") {
                 for a in attachments {
                     let path = if has(a, "abspath") { get(a, "abspath") } else { get(a, "path") };
-                    lines.push(format!("Attachment: {}", am_core::py::str_of(path)?));
+                    lines.push(format!("Attachment: {}", am_core::format::text_of(path)?));
                 }
             }
             if let Some(Value::Array(answers)) = get(item, "answers") {
@@ -491,7 +481,7 @@ pub fn render_item(item: &Value) -> Result<String> {
             let text = [get(result, "final"), get(note, "full"), get(note, "text")]
                 .into_iter()
                 .flatten()
-                .find(|v| am_core::py::truthy(Some(v)))
+                .find(|v| am_core::format::truthy(Some(v)))
                 .unwrap_or(&none);
             let Some(text) = text.as_str() else {
                 return util::crash(format!("can only concatenate str (not \"{}\") to str", type_name(text)));
@@ -513,13 +503,13 @@ pub fn render_item(item: &Value) -> Result<String> {
             }
             Ok(lines.join("\n") + "\n")
         }
-        _ => Ok(am_core::py::repr_value(item) + "\n"),
+        _ => Ok(am_core::format::literal(item) + "\n"),
     }
 }
 
 // ---------------------------------------------------------------- the chat timeline
 
-/// `mail._kind_cache`: a message's kind never changes, so it's read once per process.
+/// A message's kind never changes, so it's read once per process.
 fn kind_cache() -> &'static Mutex<HashMap<String, String>> {
     static CACHE: std::sync::OnceLock<Mutex<HashMap<String, String>>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -532,16 +522,15 @@ fn kind_of(directory: &Path, msg_id: &str) -> Result<String> {
     let message = read_json(&directory.join(format!("{msg_id}.json")))?;
     let kind = match message.as_ref().and_then(|m| get(m, "kind")) {
         Some(Value::String(s)) => s.clone(),
-        Some(other) => am_core::py::str_value(other),
+        Some(other) => am_core::format::text(other),
         None => String::new(),
     };
-    if am_core::py::truthy(message.as_ref()) {
+    if am_core::format::truthy(message.as_ref()) {
         kind_cache().lock().unwrap().insert(msg_id.to_string(), kind.clone());
     }
     Ok(kind)
 }
 
-/// Port of `mail.user_message_ids`.
 pub fn user_message_ids(slug: &str, name: &str) -> Result<Vec<String>> {
     let mut ids = Vec::new();
     for directory in [delivered_dir(slug, name), inbox_dir(slug, name)] {
@@ -555,19 +544,19 @@ pub fn user_message_ids(slug: &str, name: &str) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-/// `p[0][2:]`: an id without its prefix.
+/// An id without its prefix (`m-`, `t-`).
 fn tail(id: &str) -> &str {
     id.get(2..).unwrap_or("")
 }
 
-/// `read_json(project_dir(slug) / "ui.json", {}).get("seen", {})`.
+/// The answer versions the user has seen: `seen` in the project's `ui.json`, or `{}`.
 fn seen_versions(slug: &str) -> Result<Value> {
     let ui = read_json(&project_dir(slug).join("ui.json"))?.unwrap_or_else(util::empty);
     Ok(get(&ui, "seen").cloned().unwrap_or_else(util::empty))
 }
 
-/// Port of `mail.chat`: the items of an agent's chat, oldest first. `before` pages
-/// backwards; `since` returns everything from that id on.
+/// The items of an agent's chat, oldest first. `before` pages backwards; `since` returns
+/// everything from that id on.
 pub fn chat(slug: &str, name: &str, limit: usize, before: Option<&str>, since: Option<&str>) -> Result<Value> {
     let questions = user_message_ids(slug, name)?;
     let notes = list_json_ids(&agent_dir(slug, name).join("notes"))?;
@@ -594,7 +583,7 @@ pub fn chat(slug: &str, name: &str, limit: usize, before: Option<&str>, since: O
         if is_question {
             items.push(question_item(slug, name, &item_id, &active_ids, &seen)?);
         } else if let Some(note) = read_json(&agent_dir(slug, name).join("notes").join(format!("{item_id}.json")))? {
-            if am_core::py::truthy(Some(&note)) {
+            if am_core::format::truthy(Some(&note)) {
                 let mut merged = Map::new();
                 merged.insert("type".into(), "note".into());
                 if let Value::Object(fields) = note {
@@ -625,7 +614,7 @@ pub fn chat(slug: &str, name: &str, limit: usize, before: Option<&str>, since: O
 
 fn question_item(slug: &str, name: &str, msg_id: &str, active: &[String], seen: &Value) -> Result<Value> {
     let message = get_message(slug, name, msg_id)?
-        .filter(|m| am_core::py::truthy(Some(m)))
+        .filter(|m| am_core::format::truthy(Some(m)))
         .unwrap_or_else(|| json!({"id": msg_id, "text": "", "ts": 0}));
     let in_inbox = util::exists(&inbox_dir(slug, name).join(format!("{msg_id}.json")));
     let answers = answer_versions(slug, name, msg_id)?;
@@ -642,7 +631,7 @@ fn question_item(slug: &str, name: &str, msg_id: &str, active: &[String], seen: 
             None => None,
         };
         let empty = util::empty();
-        let result = result.filter(|r| am_core::py::truthy(Some(r))).unwrap_or(empty);
+        let result = result.filter(|r| am_core::format::truthy(Some(r))).unwrap_or(empty);
         util::or(&result, "state", &Value::from("delivered")).clone()
     };
     let field = |k: &str| get(&message, k).cloned().unwrap_or(Value::Null);
@@ -663,8 +652,8 @@ fn question_item(slug: &str, name: &str, msg_id: &str, active: &[String], seen: 
     }))
 }
 
-/// Port of `mail.unread_summary`: answers the user hasn't seen, new ones (`unread`) and new
-/// versions of ones they have (`updated`), per agent.
+/// Answers the user hasn't seen, new ones (`unread`) and new versions of ones they have
+/// (`updated`), per agent.
 pub fn unread_summary(slug: &str) -> Result<Value> {
     let seen = seen_versions(slug)?;
     let mut per_agent = Map::new();
@@ -693,7 +682,7 @@ pub fn unread_summary(slug: &str) -> Result<Value> {
     Ok(json!({"unread": total_unread, "updated": total_updated, "agents": per_agent}))
 }
 
-/// Port of `mail.mark_seen`: `versions` maps question ids to the version seen.
+/// Record what the user has seen: `versions` maps question ids to the version seen.
 pub fn mark_seen(slug: &str, versions: &Value) -> Result<()> {
     update_json(&project_dir(slug).join("ui.json"), util::empty(), |ui| {
         let f = util::fields(ui);
@@ -713,7 +702,6 @@ pub fn mark_seen(slug: &str, versions: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Port of `mail.describe_trigger`.
 pub fn describe_trigger(message: &Value) -> Value {
     json!({
         "id": get(message, "id").cloned().unwrap_or(Value::Null),
@@ -723,7 +711,6 @@ pub fn describe_trigger(message: &Value) -> Value {
     })
 }
 
-/// Port of `mail.note_line`.
 pub fn note_line(text: &str) -> String {
     first_line(text, 200)
 }

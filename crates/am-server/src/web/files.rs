@@ -1,10 +1,10 @@
 //! The app's pages and static files, artifacts (capability URLs, the stable address and
-//! the artifact API) and attachments (`web.py`, "pages", "artifacts" and part of "chat").
+//! the artifact API) and attachments.
 
 use super::api::slug;
 use super::auth;
 use super::http::{file_response, found, not_found, quote, raised, Fail, Handled, Req, Resp};
-use am_core::{new_id, project_dir, py, Value};
+use am_core::{new_id, project_dir, format, Value};
 use am_store::{artifacts, projects};
 use regex::Regex;
 use serde_json::json;
@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 
 pub const INLINE_IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp", "image/heic", "image/avif"];
 
-/// `web.SELECTION_BRIDGE`, byte for byte: added to HTML artifacts shown in the panel. An
+/// The selection bridge: added to HTML artifacts shown in the panel. An
 /// artifact has an opaque origin, so it can only reach the app by postMessage, and the app
 /// checks which window it came from.
 pub const SELECTION_BRIDGE: &str = r#"<script data-am-bridge>(function(){
@@ -69,7 +69,7 @@ pub fn index(req: &Req) -> Handled {
     file_response(req, &am_core::assets::webui_dir().join("index.html"), vec![("Cache-Control".into(), "no-cache".into())])
 }
 
-/// `Path.resolve()` for a path that must exist, or None.
+/// A path that must exist, made absolute with links resolved, or None.
 fn resolved(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok()
 }
@@ -229,7 +229,7 @@ pub fn stable_artifact(req: &Req) -> Handled {
                 Some(inside) => artifacts::read_link(&inside),
                 None => json!({}),
             };
-            if py::truthy(info.get("url")) {
+            if format::truthy(info.get("url")) {
                 return Err(found(info["url"].as_str().unwrap_or("")));
             }
         }
@@ -237,13 +237,13 @@ pub fn stable_artifact(req: &Req) -> Handled {
     Err(found(&capability_url(&slug, &path, rev, false)?))
 }
 
-/// `os.stat(...).st_mtime`, computed as CPython does.
+/// A file's mtime in seconds, as a float: the whole seconds plus the nanoseconds * 1e-9.
 pub fn st_mtime(meta: &std::fs::Metadata) -> f64 {
     use std::os::unix::fs::MetadataExt;
     meta.mtime() as f64 + meta.mtime_nsec() as f64 * 1e-9
 }
 
-/// `bytes.decode(errors="replace")`.
+/// Bytes as UTF-8 text, with U+FFFD for what isn't valid.
 pub fn decode_replace(data: &[u8]) -> String {
     String::from_utf8_lossy(data).into_owned()
 }
@@ -255,7 +255,7 @@ pub fn api_artifact(req: &Req) -> Handled {
     let name = path.split_once('/').map_or("", |(_, rest)| rest).to_string();
     if let Some(rev) = rev {
         if !rev_re().is_match(rev) {
-            return Err(Fail::Am(format!("invalid revision {}", py::repr_str(rev)?)));
+            return Err(Fail::Am(format!("invalid revision {}", format::try_quote(rev)?)));
         }
     }
     let kind = artifacts::kind_of(&path);
@@ -291,7 +291,7 @@ pub fn api_artifact(req: &Req) -> Handled {
         if kind == "link" {
             if rev.is_some() {
                 if let Ok(Value::Object(data)) = serde_json::from_slice::<Value>(&raw) {
-                    let text = |key: &str| py::str_of(Some(data.get(key).unwrap_or(&Value::String(String::new())))).unwrap_or_default();
+                    let text = |key: &str| format::text_of(Some(data.get(key).unwrap_or(&Value::String(String::new())))).unwrap_or_default();
                     let url = text("url");
                     info["link"] = json!({
                         "url": if url.starts_with("http://") || url.starts_with("https://") { url } else { String::new() },
@@ -418,7 +418,7 @@ fn safe_name_re() -> &'static Regex {
 
 pub fn api_upload(req: &Req) -> Handled {
     let slug = slug(req)?;
-    // client_max_size doesn't apply to multipart streams.
+    // An upload over the limit gets this error, not a 413.
     if req.content_length().unwrap_or(0) > super::MAX_UPLOAD || req.too_large.is_some() {
         return Err(Fail::Am(format!("uploads are limited to {} MB", super::MAX_UPLOAD / (1024 * 1024))));
     }
@@ -472,13 +472,13 @@ pub fn api_attachment(req: &Req) -> Handled {
     file_response(req, &target, headers)
 }
 
-/// `_clean_attachments`: attachments named in a message must be files in attachments/.
+/// Attachments named in a message must be files in attachments/.
 pub fn clean_attachments(slug: &str, attachments: &[Value]) -> Result<Vec<Value>, Fail> {
     let mut out = Vec::new();
     let root = resolved(&project_dir(slug).join("attachments"));
     for attachment in attachments {
         let get = |key: &str| attachment.get(key);
-        let path = py::str_of(Some(get("path").unwrap_or(&Value::String(String::new())))).unwrap_or_default();
+        let path = format::text_of(Some(get("path").unwrap_or(&Value::String(String::new())))).unwrap_or_default();
         let target = resolved(&project_dir(slug).join(&path));
         let ok = match (&root, &target) {
             (Some(root), Some(target)) => strictly_inside(root, target) && target.is_file(),
@@ -490,11 +490,11 @@ pub fn clean_attachments(slug: &str, attachments: &[Value]) -> Result<Vec<Value>
         let target = target.unwrap();
         let default_name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let name = match get("name") {
-            Some(v) => py::str_of(Some(v)).unwrap_or_default(),
+            Some(v) => format::text_of(Some(v)).unwrap_or_default(),
             None => default_name,
         };
         let mime = match get("mime") {
-            Some(v) => py::str_of(Some(v)).unwrap_or_default(),
+            Some(v) => format::text_of(Some(v)).unwrap_or_default(),
             None => String::new(),
         };
         let size = std::fs::metadata(&target)?.len();
@@ -503,7 +503,7 @@ pub fn clean_attachments(slug: &str, attachments: &[Value]) -> Result<Vec<Value>
     Ok(out)
 }
 
-/// `text[:n]`, in characters.
+/// The first `n` characters of `text`.
 pub fn truncate(text: &str, n: usize) -> String {
     text.chars().take(n).collect()
 }

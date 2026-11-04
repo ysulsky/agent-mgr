@@ -1,17 +1,18 @@
-//! Paths under `AM_HOME` (`core.py`, "paths").
+//! Paths under `AM_HOME`.
 
 use std::path::{Path, PathBuf};
 
 pub const HOME_SLUG: &str = "home";
 pub const MANAGER: &str = "manager";
 
-/// `Path(os.environ.get("AM_HOME") or "~/agents").expanduser()`.
+/// `$AM_HOME`, or `~/agents` if it's unset or empty, with `~` expanded.
 pub fn am_home() -> PathBuf {
     let raw = std::env::var("AM_HOME").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "~/agents".into());
     expand_user(&raw)
 }
 
-/// `Path.expanduser()` for `~` and `~/...` (`~user` is left alone, as Python fails on it).
+/// `~` and `~/...` expanded with `$HOME` (unless it's unset or empty). `~user` is left
+/// alone.
 pub fn expand_user(raw: &str) -> PathBuf {
     if raw == "~" || raw.starts_with("~/") {
         if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
@@ -68,7 +69,7 @@ pub fn attention_dir(slug: &str) -> PathBuf {
     project_dir(slug).join("attention")
 }
 
-/// `core.current_turn`: `$AM_TURN`, or for a long-lived process the open turn in
+/// The current turn: `$AM_TURN`, or for a long-lived process the open turn in
 /// `$AM_PROC/current.json`.
 pub fn current_turn() -> Option<String> {
     if let Some(turn) = std::env::var("AM_TURN").ok().filter(|s| !s.is_empty()) {

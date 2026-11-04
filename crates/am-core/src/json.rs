@@ -1,11 +1,32 @@
-//! Python's `json.dumps`, byte for byte, in the forms Agent Mgr uses:
-//! - `dumps`: `json.dumps(obj, indent=1, ensure_ascii=False) + "\n"`, the record files;
-//! - `dumps_compact`: `json.dumps(obj, ensure_ascii=False)`;
-//! - `dumps_ascii`: `json.dumps(obj)`, compact and ASCII-only: aiohttp's `json_response`
-//!   bodies, SSE events, and the files the turn and proc supervisors write;
-//! - `dumps_with`: any `indent` and `ensure_ascii`, for the rest (`am health --json`, ...).
+//! JSON text, in the forms Agent Mgr writes:
+//! - `encode`: the record files. One-space indentation, non-ASCII kept as it is, and a
+//!   trailing newline.
+//! - `encode_compact`: one line, non-ASCII kept as it is: JSON put on a backend's command
+//!   line, and values shown in the turn viewer.
+//! - `encode_ascii`: one line, ASCII-only: HTTP response bodies, SSE events, terminal
+//!   socket messages, and the files the turn and proc supervisors write.
+//! - `encode_with`: any indentation, ASCII-only or not, with no trailing newline, for the
+//!   rest (`am health --json`, `am agent show`, link artifacts, the offload archive's
+//!   manifest, ...).
+//!
+//! Layout. On one line, items are separated by `, ` and each key from its value by `: `.
+//! With an indentation of n, each item of an array or object goes on its own line, indented
+//! n spaces per level of nesting, with a `,` after every item but the last; a key is still
+//! followed by `: `, and the closing bracket goes on its own line at its parent's
+//! indentation. An empty array or object is `[]` or `{}` either way. Keys keep their order.
+//!
+//! Strings. `"` and `\` are escaped with a backslash; newline, carriage return, tab,
+//! backspace and form feed are written as `\n`, `\r`, `\t`, `\b`, `\f`; any other character
+//! below U+0020 is `\u00XX`. Everything else is kept as it is, except in the ASCII-only
+//! forms, which write every character outside printable ASCII (space to `~`) as `\uXXXX`
+//! in lowercase hex, a character above U+FFFF as its UTF-16 surrogate pair (U+1F600 is
+//! `\ud83d\ude00`).
+//!
+//! Numbers. Integers as integers, floats as `format::float_text` writes them (`0.1`, `1.0`,
+//! `1e+16`, `1e-05`), and non-finite floats as `NaN`, `Infinity` and `-Infinity`.
+//! `null`, `true` and `false` as themselves.
 
-use crate::py::float_repr;
+use crate::format::float_text;
 use serde_json::{Number, Value};
 
 fn dump_str(s: &str, ascii: bool, out: &mut String) {
@@ -33,8 +54,8 @@ fn dump_str(s: &str, ascii: bool, out: &mut String) {
     out.push('"');
 }
 
-/// A JSON number as Python prints it: integers as integers, floats as `repr(float)`.
-/// (Known gap, as in `rust-am`: an integer beyond 64 bits was parsed as a float.)
+/// A JSON number: integers as integers, floats as `format::float_text`. (An integer
+/// beyond 64 bits was parsed as a float, so it's written as one.)
 pub fn number(n: &Number) -> String {
     if let Some(i) = n.as_i64() {
         i.to_string()
@@ -47,7 +68,7 @@ pub fn number(n: &Number) -> String {
         } else if f.is_infinite() {
             (if f > 0.0 { "Infinity" } else { "-Infinity" }).into()
         } else {
-            float_repr(f)
+            float_text(f)
         }
     }
 }
@@ -95,29 +116,31 @@ fn dump_at(v: &Value, indent: Option<usize>, ascii: bool, depth: usize, out: &mu
     }
 }
 
-/// `json.dumps(v, indent=indent, ensure_ascii=ensure_ascii)`, with no trailing newline.
-/// With `indent`, items are separated by `,` and a newline; without, by `, `.
-pub fn dumps_with(v: &Value, indent: Option<usize>, ensure_ascii: bool) -> String {
+/// `v` with `indent` spaces per level (or on one line), ASCII-only if `ensure_ascii`, with
+/// no trailing newline. With `indent`, items are separated by `,` and a newline; without,
+/// by `, `.
+pub fn encode_with(v: &Value, indent: Option<usize>, ensure_ascii: bool) -> String {
     let mut out = String::new();
     dump_at(v, indent, ensure_ascii, 0, &mut out);
     out
 }
 
-/// What `core.write_json` writes: `json.dumps(v, indent=1, ensure_ascii=False) + "\n"`.
-pub fn dumps(v: &Value) -> String {
-    let mut out = dumps_with(v, Some(1), false);
+/// A record, as `write_json` writes it: one-space indentation, non-ASCII kept, and a
+/// trailing newline.
+pub fn encode(v: &Value) -> String {
+    let mut out = encode_with(v, Some(1), false);
     out.push('\n');
     out
 }
 
-/// `json.dumps(v, ensure_ascii=False)`.
-pub fn dumps_compact(v: &Value) -> String {
-    dumps_with(v, None, false)
+/// One line, with non-ASCII kept as it is.
+pub fn encode_compact(v: &Value) -> String {
+    encode_with(v, None, false)
 }
 
-/// `json.dumps(v)`: compact, with everything outside printable ASCII escaped.
-pub fn dumps_ascii(v: &Value) -> String {
-    dumps_with(v, None, true)
+/// One line, with everything outside printable ASCII escaped.
+pub fn encode_ascii(v: &Value) -> String {
+    encode_with(v, None, true)
 }
 
 #[cfg(test)]
@@ -126,21 +149,21 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn matches_python_indent_1() {
+    fn indent_1_layout() {
         let v = json!({"a": 1, "b": [true, null, 0.1, 1e16, 1e-5], "c": {"d": "x\ny\u{1}"}, "e": []});
         let want = "{\n \"a\": 1,\n \"b\": [\n  true,\n  null,\n  0.1,\n  1e+16,\n  1e-05\n ],\n \"c\": {\n  \"d\": \"x\\ny\\u0001\"\n },\n \"e\": []\n}\n";
-        assert_eq!(dumps(&v), want);
+        assert_eq!(encode(&v), want);
     }
 
     #[test]
-    fn matches_python_ascii() {
+    fn ascii_escapes() {
         let v = json!({"é": "a\u{7f}😀\n\u{1}", "n": [1.5, -0.0]});
-        assert_eq!(dumps_ascii(&v), r#"{"\u00e9": "a\u007f\ud83d\ude00\n\u0001", "n": [1.5, -0.0]}"#);
-        assert_eq!(dumps_with(&json!([1, {"a": "é"}]), Some(2), true), "[\n  1,\n  {\n    \"a\": \"\\u00e9\"\n  }\n]");
+        assert_eq!(encode_ascii(&v), r#"{"\u00e9": "a\u007f\ud83d\ude00\n\u0001", "n": [1.5, -0.0]}"#);
+        assert_eq!(encode_with(&json!([1, {"a": "é"}]), Some(2), true), "[\n  1,\n  {\n    \"a\": \"\\u00e9\"\n  }\n]");
     }
 
     #[test]
-    fn matches_python_compact() {
-        assert_eq!(dumps_compact(&json!({"a": [1, 2.5], "b": "é"})), "{\"a\": [1, 2.5], \"b\": \"é\"}");
+    fn compact_layout() {
+        assert_eq!(encode_compact(&json!({"a": [1, 2.5], "b": "é"})), "{\"a\": [1, 2.5], \"b\": \"é\"}");
     }
 }

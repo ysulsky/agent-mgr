@@ -1,10 +1,10 @@
 //! The `am` CLI.
 //!
-//! Each `cmd_*` follows its Python function line by line. Output is collected and written
-//! at the end; an `AmError` prints `am: <message>` and exits 1, and usage errors exit 2.
+//! Output is collected and written at the end; an error prints `am: <message>` and exits
+//! 1, and usage errors exit 2 (`args.rs`).
 
-use crate::argparse::Namespace;
-use am_core::{am_err, excerpt, first_line, now, py, Error, Result, Value, MANAGER};
+use crate::args::Parsed;
+use am_core::{am_err, excerpt, first_line, now, format, Error, Result, Value, MANAGER};
 use am_store::util::{get, has, s};
 use am_store::{items, mail, projects};
 use std::ffi::OsString;
@@ -13,7 +13,7 @@ use std::io::{Read, Write};
 /// What a command prints.
 pub type Out = Vec<u8>;
 
-/// `print(text)`.
+/// Prints `text` and a newline.
 pub fn say(out: &mut Out, text: impl AsRef<str>) {
     out.extend_from_slice(text.as_ref().as_bytes());
     out.push(b'\n');
@@ -60,7 +60,7 @@ pub fn main(argv: &[OsString]) -> i32 {
     }
 }
 
-fn dispatch(ns: &Namespace, out: &mut Out) -> Result<()> {
+fn dispatch(ns: &Parsed, out: &mut Out) -> Result<()> {
     match ns.str("command").unwrap_or_default() {
         "setup" => cmd_setup(out),
         "daemon" => crate::cli_ext::cmd_daemon(ns, out),
@@ -86,12 +86,13 @@ fn dispatch(ns: &Namespace, out: &mut Out) -> Result<()> {
 
 // ---------------------------------------------------------------- helpers
 
-/// `os.environ.get(name)`, with an empty value as unset where Python tests truthiness.
+/// An environment variable, with an empty value as unset.
 pub fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|s| !s.is_empty())
 }
 
-/// `_sender()`.
+/// Who's sending: `project/agent` from `$AM_PROJECT` and `$AM_AGENT` (an agent's turn), else
+/// `user`.
 pub fn sender() -> String {
     match (env("AM_PROJECT"), env("AM_AGENT")) {
         (Some(p), Some(a)) => format!("{p}/{a}"),
@@ -99,7 +100,7 @@ pub fn sender() -> String {
     }
 }
 
-/// `_author()`.
+/// Who's making a change: `$AM_AGENT`, if it's set.
 pub fn author() -> Option<String> {
     std::env::var("AM_AGENT").ok()
 }
@@ -108,19 +109,19 @@ pub fn stdin_is_tty() -> bool {
     unsafe { libc::isatty(0) == 1 }
 }
 
-/// `sys.stdin.read()`: UTF-8, with line ends as they are.
+/// All of stdin: UTF-8, with line ends as they are.
 pub fn read_stdin() -> Result<String> {
     let mut bytes = Vec::new();
     std::io::stdin().read_to_end(&mut bytes)?;
     String::from_utf8(bytes).map_err(|_| Error::Other("'utf-8' codec can't decode the standard input".into()))
 }
 
-/// `open(file, encoding="utf-8").read()`: universal newlines.
+/// A UTF-8 file, with `\r\n` and `\r` read as `\n`.
 fn read_file(path: &str) -> Result<String> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(Error::Other(format!("[Errno 2] No such file or directory: {}", py::repr(path))))
+            return Err(Error::Other(format!("[Errno 2] No such file or directory: {}", format::quote(path))))
         }
         Err(e) => return Err(e.into()),
     };
@@ -128,7 +129,7 @@ fn read_file(path: &str) -> Result<String> {
     Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
 }
 
-/// `_read_text`: text from arguments, `-f FILE`, or stdin with `-`.
+/// Text from arguments, `-f FILE`, or stdin with `-`.
 pub fn read_text(parts: Option<&[String]>, file: Option<&str>, required: bool) -> Result<String> {
     if let Some(f) = file.filter(|f| !f.is_empty()) {
         return if f == "-" { read_stdin() } else { read_file(f) };
@@ -143,7 +144,7 @@ pub fn read_text(parts: Option<&[String]>, file: Option<&str>, required: bool) -
     }
     if !stdin_is_tty() {
         let data = read_stdin()?;
-        if !py::strip(&data).is_empty() {
+        if !format::strip(&data).is_empty() {
             return Ok(data);
         }
     }
@@ -153,9 +154,9 @@ pub fn read_text(parts: Option<&[String]>, file: Option<&str>, required: bool) -
     Ok(String::new())
 }
 
-/// `_ago(ts)`.
+/// How long ago `ts` was: `45s ago`, `12m ago`, `3h ago`, `2d ago`, or `-` for none.
 pub fn ago(ts: Option<&Value>) -> String {
-    if !py::truthy(ts) {
+    if !format::truthy(ts) {
         return "-".into();
     }
     let ts = am_store::util::num(ts).unwrap_or(0.0);
@@ -171,34 +172,34 @@ pub fn ago(ts: Option<&Value>) -> String {
     }
 }
 
-/// `_project(args)`.
-pub fn project_of(ns: &Namespace) -> Result<String> {
+/// The project: `--project`, else the current one; an error if there's none.
+pub fn project_of(ns: &Parsed) -> Result<String> {
     projects::require_current_project(ns.str("project"))
 }
 
-/// `f"{value:.2f}"`.
+/// A number with two decimals.
 pub fn f2(v: Option<&Value>) -> String {
     format!("{:.2}", am_store::util::num(v).unwrap_or(0.0))
 }
 
-/// `excerpt(value)` for a JSON value that should be text.
+/// `excerpt` for a JSON value that should be text.
 pub fn excerpt_value(v: Option<&Value>, limit: usize) -> String {
     match v {
         Some(Value::String(t)) => excerpt(t, limit),
-        Some(other) if py::truthy(Some(other)) => excerpt(&py::str_value(other), limit),
+        Some(other) if format::truthy(Some(other)) => excerpt(&format::text(other), limit),
         _ => String::new(),
     }
 }
 
-/// The current project, as `args.project or projects.current_project()`.
-fn current(ns: &Namespace) -> Result<Option<String>> {
+/// The current project: `--project` if given, else `projects::current_project`.
+fn current(ns: &Parsed) -> Result<Option<String>> {
     match ns.str("project").filter(|p| !p.is_empty()) {
         Some(p) => Ok(Some(p.to_string())),
         None => projects::current_project(),
     }
 }
 
-/// `_require_setup()`.
+/// An error unless `am setup` has run.
 pub fn require_setup() -> Result<()> {
     if !am_store::setup::is_set_up() {
         return am_err(format!("{} isn't set up; run `am setup`", am_core::am_home().display()));
@@ -225,7 +226,7 @@ fn cmd_setup(out: &mut Out) -> Result<()> {
 
 // ---------------------------------------------------------------- messages
 
-fn cmd_send(ns: &Namespace, out: &mut Out) -> Result<()> {
+fn cmd_send(ns: &Parsed, out: &mut Out) -> Result<()> {
     let current = current(ns)?;
     let (slug, name) = projects::parse_address(ns.str("agent").unwrap_or_default(), current.as_deref())?;
     let sender = sender();
@@ -238,7 +239,7 @@ fn cmd_send(ns: &Namespace, out: &mut Out) -> Result<()> {
         let Some(item) = mail::find_item(id, Some(&slug))? else { return am_err(format!("no item {id}")) };
         let empty = am_store::util::empty();
         let message = am_store::util::or(&item, "message", &empty);
-        let body = [get(message, "text"), get(&item, "text"), get(&item, "title")].into_iter().flatten().find(|v| py::truthy(Some(v)));
+        let body = [get(message, "text"), get(&item, "text"), get(&item, "title")].into_iter().flatten().find(|v| format::truthy(Some(v)));
         reply_to = Some(serde_json::json!({"id": id, "excerpt": excerpt_value(body, 240)}));
     }
     let interrupt = ns.flag("interrupt");
@@ -257,17 +258,18 @@ fn cmd_send(ns: &Namespace, out: &mut Out) -> Result<()> {
     Ok(())
 }
 
-fn cmd_stop(ns: &Namespace, out: &mut Out) -> Result<()> {
+fn cmd_stop(ns: &Parsed, out: &mut Out) -> Result<()> {
     let current = current(ns)?;
     let (slug, name) = projects::parse_address(ns.str("agent").unwrap_or_default(), current.as_deref())?;
-    // runner.request_stop: ask the runner to stop an agent's main turn, from any process.
+    // As `am_turns::runner::request_stop`: ask the runner to stop an agent's main turn,
+    // from any process.
     am_core::write_json(&am_core::agent_dir(&slug, &name).join("stop.json"), &serde_json::json!({"at": am_store::util::now_value()}))?;
     am_core::poke(&slug);
     say(out, format!("Stopping the main turn of {slug}/{name}."));
     Ok(())
 }
 
-fn cmd_answer(ns: &Namespace, out: &mut Out) -> Result<()> {
+fn cmd_answer(ns: &Parsed, out: &mut Out) -> Result<()> {
     let id = ns.str("id").unwrap_or_default();
     let question = id.split('@').next().unwrap_or_default().to_string();
     let (project, agent) = (std::env::var("AM_PROJECT").ok(), std::env::var("AM_AGENT").ok());
@@ -287,14 +289,15 @@ fn cmd_answer(ns: &Namespace, out: &mut Out) -> Result<()> {
     Ok(())
 }
 
-/// `items[-limit:]`.
+/// The last `limit` items: all of them for 0, and a negative limit drops that many from
+/// the front.
 pub fn last_n<T: Clone>(items: &[T], limit: i64) -> Vec<T> {
     let len = items.len() as i64;
     let start = if limit <= 0 { (-limit).min(len) } else { (len - limit).max(0) };
     items[start as usize..].to_vec()
 }
 
-fn cmd_questions(ns: &Namespace, out: &mut Out) -> Result<()> {
+fn cmd_questions(ns: &Parsed, out: &mut Out) -> Result<()> {
     let slug = project_of(ns)?;
     let name = ns.str("agent").filter(|a| !a.is_empty()).map(String::from).or_else(|| env("AM_AGENT")).unwrap_or(MANAGER.into());
     let ids = last_n(&mail::user_message_ids(&slug, &name)?, ns.int("limit").unwrap_or(20));
@@ -302,7 +305,7 @@ fn cmd_questions(ns: &Namespace, out: &mut Out) -> Result<()> {
         say(out, "No questions yet.");
     }
     for question in ids {
-        let message = mail::get_message(&slug, &name, &question)?.filter(|m| py::truthy(Some(m))).unwrap_or_else(am_store::util::empty);
+        let message = mail::get_message(&slug, &name, &question)?.filter(|m| format::truthy(Some(m))).unwrap_or_else(am_store::util::empty);
         let answers = mail::answer_versions(&slug, &name, &question)?;
         let text = get(&message, "text").cloned().unwrap_or_else(|| "".into());
         say(out, format!("{question}  {}: {}", ago(get(&message, "ts")), excerpt_value(Some(&text), 100)));
@@ -314,7 +317,7 @@ fn cmd_questions(ns: &Namespace, out: &mut Out) -> Result<()> {
     Ok(())
 }
 
-fn cmd_show(ns: &Namespace, out: &mut Out) -> Result<()> {
+fn cmd_show(ns: &Parsed, out: &mut Out) -> Result<()> {
     let id = ns.str("id").unwrap_or_default();
     match mail::find_item(id, current(ns)?.as_deref())? {
         None => am_err(format!("nothing found with id {id}")),
@@ -394,7 +397,7 @@ fn archive(slug: &str, out: &mut Out) -> Result<()> {
     Ok(())
 }
 
-/// `storage.offloaded_info`.
+/// As `am_ops::storage::offloaded_info`: the project's `offloaded` info, or null.
 pub fn offloaded_info(slug: &str) -> Result<Value> {
     Ok(get(&projects::get_project(slug)?, "offloaded").cloned().unwrap_or(Value::Null))
 }
@@ -405,7 +408,7 @@ fn unarchive(slug: &str, out: &mut Out) -> Result<()> {
         return Ok(());
     }
     let info = offloaded_info(slug)?;
-    if py::truthy(Some(&info)) {
+    if format::truthy(Some(&info)) {
         say(out, format!("{slug} is offloaded, so it's restored first, from {}...", s(&info, "remote")));
         crate::cli_ext::restore_project(slug, true)?;
     } else {
@@ -422,7 +425,7 @@ fn unarchive(slug: &str, out: &mut Out) -> Result<()> {
     Ok(())
 }
 
-fn cmd_project(ns: &Namespace, out: &mut Out) -> Result<()> {
+fn cmd_project(ns: &Parsed, out: &mut Out) -> Result<()> {
     match ns.str("action").unwrap_or_default() {
         "create" => {
             let name = ns.list("name").unwrap_or_default().join(" ");
@@ -449,7 +452,8 @@ fn cmd_project(ns: &Namespace, out: &mut Out) -> Result<()> {
                 let busy = states.iter().filter(|st| running(st)).count();
                 let mark = if has(&project, "offloaded") { " (archived, offloaded)" } else if archived { " (archived)" } else { "" };
                 let what = ["status", "description"].iter().find(|k| has(&project, k)).map_or_else(|| s(&project, "name"), |k| s(&project, k));
-                // Python's sum() starts from 0, not Rust's -0.0, so an empty sum prints "0.00".
+                // Folded from 0.0: `sum()` would start from -0.0, so an empty sum would print
+                // "-0.00" instead of "0.00".
                 let cost = states.iter().map(|st| am_store::util::num(get(st, "cost_usd")).unwrap_or(0.0)).fold(0.0, |a, b| a + b);
                 let mut line = format!("{slug}{mark}: {what}  [{busy} running, ${cost:.2}");
                 if archived {
@@ -543,7 +547,7 @@ fn print_agents(slug: &str, include_retired: bool, out: &mut Out) -> Result<()> 
     Ok(())
 }
 
-fn cmd_agent(ns: &Namespace, out: &mut Out) -> Result<()> {
+fn cmd_agent(ns: &Parsed, out: &mut Out) -> Result<()> {
     let slug = project_of(ns)?;
     let name = ns.str("name").unwrap_or_default();
     match ns.str("action").unwrap_or_default() {
@@ -568,7 +572,7 @@ fn cmd_agent(ns: &Namespace, out: &mut Out) -> Result<()> {
         }
         "show" => {
             let status = projects::agent_status(&slug, name, None, None)?;
-            say(out, am_core::json::dumps_with(&status, Some(1), true));
+            say(out, am_core::json::encode_with(&status, Some(1), true));
             say(out, format!("Turns: {}", am_core::turns_dir(&slug, name).display()));
         }
         _ => {}

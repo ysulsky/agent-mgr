@@ -1,12 +1,100 @@
-//! Python 3.11's argparse, for the parsers `cli.py` builds: the same parsing algorithm
-//! (option prefixes, `--opt=value`, `-Pvalue`, `--`, positionals consumed in chunks
-//! between options, subparsers), the same help and usage text, and the same errors.
+//! Command-line parsing for `am`. Each command and subcommand has a [`Parser`] with options,
+//! positionals and at most one set of subcommands; parsing gives a [`Parsed`], or an
+//! [`Exit`] for help and usage errors.
+//!
+//! # Classifying arguments
+//!
+//! Every argument is first classified against the parser's own option strings:
+//!
+//! - `--` ends the options: every argument after it is a positional, even one starting
+//!   with `-`. Each positional drops the first `--` from the arguments it takes.
+//! - An argument that doesn't start with `-`, the empty string, and `-` alone are
+//!   positionals.
+//! - An exact option string (`--project`, `-P`) is that option. An exact match wins over a
+//!   prefix.
+//! - `--opt=value` and `-x=value`: the text before the first `=` names the option, and the
+//!   rest is its value, which may be empty or start with `-`.
+//! - `-xvalue`: a single-dash option followed by more text takes that text as its value.
+//!   For a flag, the text is more single-letter flags (`-ab` is `-a -b`; a letter that isn't
+//!   an option is unrecognized), but `-a=x`, or text starting with `-`, is an error.
+//! - A `--` option may be abbreviated to any prefix that matches only one option string:
+//!   `--desc` for `--description`, `--desc=x` too. A prefix that matches more than one is an
+//!   error: `ambiguous option: --h could match --help, --health-every`.
+//! - Anything else starting with `-` is a positional if it looks like a negative number
+//!   (`-5`, `-1.5`, `-.5`) or contains a space, and otherwise an unrecognized option.
+//!
+//! # Consuming them
+//!
+//! Options and positionals may come in any order. Parsing alternates: the arguments before
+//! the next option go to the positionals not yet filled, in order, as many positionals as
+//! can take them; then the option takes its values; and so on. A `?` or `*` positional
+//! reached in such a run is done, even if it got nothing: `am memory add foo -f FILE bar`
+//! leaves `bar` unrecognized. Positionals left at the end take the remaining arguments,
+//! and arguments no positional can take are unrecognized.
+//!
+//! An option's values are the arguments right after it that are neither options nor `--`,
+//! so a value that looks like an option has to be attached: `--opt=-x`. Given more than
+//! once, an option's last value wins.
+//!
+//! # Nargs
+//!
+//! How many values an argument takes, and what lands in the namespace:
+//!
+//! | [`Nargs`] | in usage | takes | value |
+//! |---|---|---|---|
+//! | `One` | `X` | exactly one | the value |
+//! | `Optional` | `[X]` | zero or one | the value, or the default |
+//! | `ZeroOrMore` | `[X ...]` | any number | a list; with none, a positional's default if it has one |
+//! | `OneOrMore` | `X [X ...]` | at least one | a list |
+//! | `Zero` | | none | flags: `true` (`false` when absent); help: shows it |
+//! | `Parser` | `X ...` | a subcommand and every argument after it | the subcommand's name |
+//!
+//! A positional is required unless it's `?`, or `*` with a default; an option only when
+//! marked `.required()`. A `*` positional counts as given once parsing reaches it,
+//! with or without values, so it's only missing when an earlier positional is too
+//! (`required: name, text`). Arguments not given get their defaults (`V::None` unless set).
+//!
+//! An integer argument (`.int()`) takes a decimal integer: an optional sign,
+//! surrounding whitespace, and single `_`s between digits allowed. An argument with
+//! choices must be one of them; a subcommand's name must be one of the subcommands.
+//!
+//! # Subcommands
+//!
+//! A subcommand takes everything after its name, options included: `am send -h` is
+//! `send`'s help, not `am`'s. Its parser parses those arguments the same way, and its
+//! values join the namespace. The arguments it doesn't recognize are passed up and
+//! reported by the top parser.
+//!
+//! # Help and errors
+//!
+//! `-h`/`--help` prints the parser's help page (`help.rs`) on stdout and exits 0, as soon as
+//! parsing reaches it: an earlier error still wins, but missing required arguments don't
+//! matter.
+//!
+//! A usage error prints the parser's usage, then `PROG: error: MESSAGE`, on stderr, and
+//! exits 2. PROG is the command path of the parser that found the error (`am send: error:
+//! ...`), except that unrecognized arguments always get `am`'s usage and `am: error: ...`.
+//! The messages, with values quoted by `am_core::format::quote`:
+//!
+//! - `ambiguous option: --w could match --worker-backend, --worker-model`
+//! - `unrecognized arguments: --bogus extra`
+//! - `the following arguments are required: agent, text`
+//! - `argument --description: expected one argument` (or `expected at most one argument`,
+//!   `expected at least one argument`)
+//! - `argument --all: ignored explicit argument 'x'`, for a value given to a flag
+//! - `argument id: invalid int value: 'x'`
+//! - `argument --backend: invalid choice: 'x' (choose from 'claude', 'codex')`
+//!
+//! An argument is named by its option strings joined with `/` (`--project/-P`), else its
+//! metavar (`COMMAND`), else its dest. Errors found while classifying (ambiguous options)
+//! come first, then the others in argument order, then missing arguments, then
+//! unrecognized ones.
 
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Nargs {
-    /// `nargs=None`: exactly one.
+    /// Exactly one.
     One,
     /// `?`
     Optional,
@@ -16,7 +104,7 @@ pub enum Nargs {
     OneOrMore,
     /// A subparsers action: a command and everything after it.
     Parser,
-    /// `nargs=0`: flags and help.
+    /// None: flags and help.
     Zero,
 }
 
@@ -116,15 +204,15 @@ impl Action {
     }
 }
 
-/// `add_argument(name)`: a positional (required unless `?`, or `*` with a default).
+/// A positional (required unless `?`, or `*` with a default).
 pub fn pos(dest: &str) -> Action {
     let mut a = Action::new(Kind::Store, dest);
     a.required = true;
     a
 }
 
-/// `add_argument(*option_strings)`: an option taking one value; dest from the first long
-/// option string (`--reply-to` -> `reply_to`).
+/// An option taking one value; its dest is the first long option string without the
+/// dashes, `-` as `_` (`--reply-to` -> `reply_to`).
 pub fn opt(strings: &[&str]) -> Action {
     let long = strings.iter().find(|s| s.starts_with("--")).unwrap_or(&strings[0]);
     let mut a = Action::new(Kind::Store, &long.trim_start_matches('-').replace('-', "_"));
@@ -132,7 +220,7 @@ pub fn opt(strings: &[&str]) -> Action {
     a
 }
 
-/// `add_argument(*option_strings, action="store_true")`.
+/// A flag: `true` if given, else `false`.
 pub fn flag(strings: &[&str]) -> Action {
     let mut a = opt(strings);
     a.kind = Kind::StoreTrue;
@@ -149,7 +237,7 @@ pub struct Parser {
 }
 
 impl Parser {
-    /// `ArgumentParser(prog=..., description=...)`, with `-h/--help`.
+    /// A parser for `prog`, with `-h/--help`.
     pub fn new(prog: &str, description: Option<&str>) -> Self {
         let mut help = Action::new(Kind::Help, "help");
         help.option_strings = vec!["-h".into(), "--help".into()];
@@ -163,12 +251,12 @@ impl Parser {
         self
     }
 
-    /// `parents=[project_opt]`.
+    /// The shared `--project/-P` option.
     pub fn project_opt(self) -> Self {
         self.arg(opt(&["--project", "-P"]).help("the project; defaults to the current one"))
     }
 
-    /// `add_subparsers(dest=..., required=True, metavar=...)` with its parsers, each
+    /// Required subcommands, stored in `dest` and shown as `metavar` if given, each
     /// `(name, help, parser)`. Each parser's prog is this one's plus the name.
     pub fn subparsers(mut self, dest: &str, metavar: Option<&str>, parsers: Vec<(&str, Option<&str>, Parser)>) -> Self {
         let mut a = Action::new(Kind::Subparsers, dest);
@@ -212,9 +300,9 @@ fn fix_progs(parser: &mut Parser) {
 
 /// The parsed arguments.
 #[derive(Debug, Default, Clone)]
-pub struct Namespace(pub HashMap<String, V>);
+pub struct Parsed(pub HashMap<String, V>);
 
-impl Namespace {
+impl Parsed {
     pub fn get(&self, k: &str) -> &V {
         self.0.get(k).unwrap_or(&V::None)
     }
@@ -267,7 +355,7 @@ fn looks_negative(s: &str) -> bool {
 }
 
 impl Parser {
-    /// `_parse_optional`: `Ok(None)` for a positional.
+    /// Classifies one argument: `Ok(None)` for a positional.
     fn parse_optional(&self, arg: &str) -> Result<Option<OptTuple>, Exit> {
         if arg.is_empty() || !arg.starts_with('-') {
             return Ok(None);
@@ -298,7 +386,7 @@ impl Parser {
         Ok(Some(OptTuple { action: None, option_string: arg.into(), sep: None, explicit: None }))
     }
 
-    /// `_get_option_tuples`: what an abbreviated or attached option could be.
+    /// What an abbreviated or attached option could be.
     fn option_tuples(&self, arg: &str) -> Vec<OptTuple> {
         let mut out = Vec::new();
         let chars: Vec<char> = arg.chars().collect();
@@ -328,18 +416,18 @@ impl Parser {
         out
     }
 
-    /// `parse_args`: the namespace, or how to exit.
-    pub fn parse_args(&self, args: &[String]) -> Result<Namespace, Exit> {
-        let mut ns = Namespace::default();
-        let extras = self.parse_known_args(args, &mut ns)?;
+    /// The namespace, or how to exit; arguments left over are an error.
+    pub fn parse_args(&self, args: &[String]) -> Result<Parsed, Exit> {
+        let mut ns = Parsed::default();
+        let extras = self.parse_known(args, &mut ns)?;
         if !extras.is_empty() {
             return Err(self.error(&format!("unrecognized arguments: {}", extras.join(" "))));
         }
         Ok(ns)
     }
 
-    /// `parse_known_args` into `ns`: the arguments it didn't recognize.
-    pub fn parse_known_args(&self, args: &[String], ns: &mut Namespace) -> Result<Vec<String>, Exit> {
+    /// Parses into `ns`, returning the arguments it didn't recognize.
+    pub fn parse_known(&self, args: &[String], ns: &mut Parsed) -> Result<Vec<String>, Exit> {
         for a in &self.actions {
             if a.kind != Kind::Help && !ns.0.contains_key(&a.dest) {
                 ns.0.insert(a.dest.clone(), a.default.clone());
@@ -400,7 +488,8 @@ impl Parser {
     }
 }
 
-/// `_get_action_name`.
+/// How errors name an argument: its option strings joined with `/`, else its metavar,
+/// else its dest.
 pub fn action_name(a: &Action) -> String {
     if !a.option_strings.is_empty() {
         a.option_strings.join("/")
@@ -411,7 +500,8 @@ pub fn action_name(a: &Action) -> String {
     }
 }
 
-/// `_get_nargs_pattern`, anchored at the start.
+/// The regex for an argument's nargs over the pattern of `O`, `A` and `-`; a positional
+/// may also take the `--` around its values.
 fn nargs_pattern(a: &Action) -> &'static str {
     let optional = !a.option_strings.is_empty();
     match (a.nargs, optional) {
@@ -429,7 +519,7 @@ fn nargs_pattern(a: &Action) -> &'static str {
     }
 }
 
-/// `re.match(pattern, text)`: the length of each group.
+/// Matches `pattern` at the start of `text`: the length of each group.
 fn match_groups(pattern: &str, text: &str) -> Option<Vec<usize>> {
     let re = regex::Regex::new(&format!("^{pattern}")).ok()?;
     let caps = re.captures(text)?;
@@ -437,7 +527,7 @@ fn match_groups(pattern: &str, text: &str) -> Option<Vec<usize>> {
 }
 
 impl Parser {
-    /// `parser.error(message)`: usage and the message on stderr, status 2.
+    /// A usage error: usage and `PROG: error: MESSAGE` on stderr, status 2.
     pub fn error(&self, message: &str) -> Exit {
         Exit { code: 2, stdout: String::new(), stderr: format!("{}{}: error: {message}\n", self.format_usage(), self.prog) }
     }
@@ -446,7 +536,7 @@ impl Parser {
         self.error(&format!("argument {}: {message}", action_name(a)))
     }
 
-    /// `_match_argument`: how many of the strings an option takes.
+    /// How many of the strings an option takes, or the error if they don't fit its nargs.
     fn match_argument(&self, a: &Action, pattern: &str) -> Result<usize, Exit> {
         match match_groups(nargs_pattern(a), pattern) {
             Some(groups) => Ok(groups[0]),
@@ -470,7 +560,7 @@ impl Parser {
         mut start: usize,
         positionals: &mut Vec<usize>,
         seen: &mut [bool],
-        ns: &mut Namespace,
+        ns: &mut Parsed,
         extras: &mut Vec<String>,
     ) -> Result<usize, Exit> {
         let selected = &pattern[start..];
@@ -499,7 +589,7 @@ impl Parser {
         start: usize,
         options: &HashMap<usize, OptTuple>,
         seen: &mut [bool],
-        ns: &mut Namespace,
+        ns: &mut Parsed,
         extras: &mut Vec<String>,
     ) -> Result<usize, Exit> {
         let t = options[&start].clone();
@@ -517,7 +607,7 @@ impl Parser {
                 let second_is_dash = option_string.chars().nth(1) == Some('-');
                 if count == 0 && !second_is_dash && !exp.is_empty() {
                     if sep == Some(true) || exp.starts_with('-') {
-                        return Err(self.arg_error(act, &format!("ignored explicit argument {}", am_core::py::repr(&exp))));
+                        return Err(self.arg_error(act, &format!("ignored explicit argument {}", am_core::format::quote(&exp))));
                     }
                     tuples.push((a, vec![]));
                     let first = exp.chars().next().unwrap();
@@ -545,7 +635,7 @@ impl Parser {
                     tuples.push((a, vec![exp]));
                     break;
                 } else {
-                    return Err(self.arg_error(act, &format!("ignored explicit argument {}", am_core::py::repr(&exp))));
+                    return Err(self.arg_error(act, &format!("ignored explicit argument {}", am_core::format::quote(&exp))));
                 }
             } else {
                 let from = start + 1;
@@ -561,12 +651,12 @@ impl Parser {
         Ok(stop)
     }
 
-    /// `_get_value` and `_check_value` for one string.
+    /// Converts one string (to an integer for an int argument) and checks its choices.
     fn convert(&self, a: &Action, s: &str) -> Result<V, Exit> {
         let v = if a.int {
-            match am_core::py::parse_int(s) {
+            match am_core::format::parse_int(s) {
                 Some(i) => V::Int(i),
-                None => return Err(self.arg_error(a, &format!("invalid int value: {}", am_core::py::repr(s)))),
+                None => return Err(self.arg_error(a, &format!("invalid int value: {}", am_core::format::quote(s)))),
             }
         } else {
             V::Str(s.to_string())
@@ -578,10 +668,10 @@ impl Parser {
     fn check(&self, a: &Action, s: &str) -> Result<(), Exit> {
         if let Some(choices) = &a.choices {
             if !choices.iter().any(|c| c == s) {
-                let listed: Vec<String> = choices.iter().map(|c| am_core::py::repr(c)).collect();
+                let listed: Vec<String> = choices.iter().map(|c| am_core::format::quote(c)).collect();
                 return Err(self.arg_error(
                     a,
-                    &format!("invalid choice: {} (choose from {})", am_core::py::repr(s), listed.join(", ")),
+                    &format!("invalid choice: {} (choose from {})", am_core::format::quote(s), listed.join(", ")),
                 ));
             }
         }
@@ -593,7 +683,7 @@ impl Parser {
         index: usize,
         mut strings: Vec<String>,
         seen: &mut [bool],
-        ns: &mut Namespace,
+        ns: &mut Parsed,
         extras: &mut Vec<String>,
     ) -> Result<(), Exit> {
         seen[index] = true;
@@ -614,8 +704,8 @@ impl Parser {
                 self.check(a, &name)?;
                 ns.0.insert(a.dest.clone(), V::Str(name.clone()));
                 let parser = &a.parsers.iter().find(|(n, _)| *n == name).unwrap().1;
-                let mut sub = Namespace::default();
-                let unknown = parser.parse_known_args(&strings[1..], &mut sub)?;
+                let mut sub = Parsed::default();
+                let unknown = parser.parse_known(&strings[1..], &mut sub)?;
                 ns.0.extend(sub.0);
                 ns.0.entry("\0unrecognized".into()).or_insert(V::List(vec![]));
                 if let Some(V::List(l)) = ns.0.get_mut("\0unrecognized") {

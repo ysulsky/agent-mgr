@@ -3,7 +3,7 @@
 //! their git stores, and `am setup`.
 //!
 //! Everything here is synchronous `std` code that works on files, whether or not a daemon
-//! is running, exactly as the Python modules do.
+//! is running.
 
 pub mod artifacts;
 pub mod gitstore;

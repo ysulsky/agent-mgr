@@ -1,4 +1,4 @@
-//! Ids and slugs (`core.new_id`, `core.check_item_id`, `core.slugify`).
+//! Ids and slugs.
 
 use crate::{am_err, Result};
 use regex::Regex;
@@ -21,8 +21,8 @@ pub(crate) fn random_from(alphabet: &[u8], n: usize) -> String {
     out
 }
 
-/// `core.new_id`: a short id that sorts by creation time, `m-0mh3k2x9a7f3q`: nine base36
-/// digits of milliseconds, then four random ones.
+/// A short id that sorts by creation time, `m-0mh3k2x9a7f3q`: nine base36 digits of
+/// milliseconds, then four random ones.
 pub fn new_id(prefix: &str) -> String {
     let mut ms = (crate::clock::now() * 1000.0) as u64;
     let mut stamp = Vec::new();
@@ -37,35 +37,35 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}-{}{}", String::from_utf8(stamp).unwrap(), random_from(BASE36, 4))
 }
 
-/// `AGENT_NAME_RE`, whose `$` (as Python's) also matches before a final newline.
+/// Valid agent names. Like the other patterns here, it also allows one final newline.
 pub fn agent_name_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^[a-z0-9][a-z0-9_-]{0,47}\n?$").unwrap())
 }
 
-/// `SLUG_RE`, whose `$` (as Python's) also matches before a final newline.
+/// Valid project slugs, also allowing one final newline.
 pub fn slug_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^[a-z0-9][a-z0-9-]{0,63}\n?$").unwrap())
 }
 
-/// `ITEM_ID_RE.match(text)`: `^[a-z]-[a-z0-9-]{1,80}$`, where Python's `$` also matches
-/// before a final newline.
+/// Whether `item_id` is `^[a-z]-[a-z0-9-]{1,80}$`, also allowing one final newline.
 pub fn is_item_id(item_id: &str) -> bool {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^[a-z]-[a-z0-9-]{1,80}\n?$").unwrap()).is_match(item_id)
 }
 
-/// `core.check_item_id`: ids become file names, so one from a request can't be a path.
+/// Check an id: ids become file names, so one from a request can't be a path.
 pub fn check_item_id(item_id: &str) -> Result<&str> {
     if is_item_id(item_id) {
         Ok(item_id)
     } else {
-        am_err(format!("invalid id {}", crate::py::repr_str(item_id).unwrap_or_else(|_| format!("'{item_id}'"))))
+        am_err(format!("invalid id {}", crate::format::try_quote(item_id).unwrap_or_else(|_| format!("'{item_id}'"))))
     }
 }
 
-/// `core.slugify`.
+/// A project slug from a name: lowercased, each run of other characters as `-`, no `-` at
+/// either end, at most 64 characters.
 pub fn slugify(name: &str) -> Result<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let lowered = name.to_lowercase();
@@ -73,7 +73,7 @@ pub fn slugify(name: &str) -> Result<String> {
     let trimmed: String = replaced.trim_matches('-').chars().take(64).collect();
     let slug = trimmed.trim_matches('-').to_string();
     if slug.is_empty() {
-        return am_err(format!("cannot make a project slug from {}", crate::py::repr_str(name).unwrap_or_else(|_| format!("'{name}'"))));
+        return am_err(format!("cannot make a project slug from {}", crate::format::try_quote(name).unwrap_or_else(|_| format!("'{name}'"))));
     }
     Ok(slug)
 }

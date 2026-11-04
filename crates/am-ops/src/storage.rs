@@ -24,7 +24,7 @@ pub const STUB_SUFFIX: &str = ".offloaded";
 pub const PROVIDERS: [(&str, &str, &[&str]); 1] =
     [("google-drive", "gdrive", &["config", "create", "gdrive", "drive", "scope=drive.file"])];
 
-/// `PROVIDERS[provider]["remote"]`: the rclone remote a provider's Connect creates.
+/// The rclone remote a provider's Connect creates.
 pub fn provider_remote(provider: &str) -> Option<&'static str> {
     PROVIDERS.iter().find(|(name, _, _)| *name == provider).map(|(_, remote, _)| *remote)
 }
@@ -34,19 +34,19 @@ fn manifest() -> PathBuf {
 }
 
 fn load(cfg: Option<&Value>) -> Result<Value> {
-    match cfg.filter(|c| am_core::py::truthy(Some(c))) {
+    match cfg.filter(|c| am_core::format::truthy(Some(c))) {
         Some(c) => Ok(c.clone()),
         None => am_core::config::load(),
     }
 }
 
-/// `cfg["storage"].get(key) or ""`.
+/// A `[storage]` setting as text, or empty if it's missing or falsy.
 fn storage_str(cfg: &Value, key: &str) -> String {
     let section = cfg.get("storage").cloned().unwrap_or(Value::Null);
     if has(&section, key) { s(&section, key) } else { String::new() }
 }
 
-/// Port of `storage.remote_root`: `<remote>:<folder>`, or why there's none.
+/// `<remote>:<folder>`, or why there's none.
 pub fn remote_root(cfg: Option<&Value>) -> Result<String> {
     let cfg = load(cfg)?;
     let remote = storage_str(&cfg, "rclone_remote");
@@ -67,14 +67,14 @@ fn folder(cfg: &Value) -> String {
     f.trim_matches('/').to_string()
 }
 
-/// `subprocess.run(["rclone", ...], capture_output=True, text=True)`.
+/// What an rclone run returned: its exit status and its output as text.
 pub struct Ran {
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
 }
 
-/// `storage._rclone`.
+/// Run rclone, capturing its output with line ends as `\n`.
 pub fn rclone(args: &[&str]) -> Result<Ran> {
     if am_store::setup::which("rclone").is_none() {
         return am_err("rclone is not installed; on a Mac run `brew install rclone`");
@@ -84,7 +84,7 @@ pub fn rclone(args: &[&str]) -> Result<Ran> {
     Ok(Ran { code: out.status.code().unwrap_or(-1), stdout: text(&out.stdout), stderr: text(&out.stderr) })
 }
 
-/// `storage._relative`: where a path lives in the remote, relative to AM_HOME.
+/// Where a path lives in the remote, relative to AM_HOME.
 fn relative(path: &Path) -> Result<String> {
     let home = projects::resolve(&am_home());
     let resolved = projects::resolve(path);
@@ -94,12 +94,13 @@ fn relative(path: &Path) -> Result<String> {
     }
 }
 
-/// `str.strip()` of rclone's stderr.
+/// rclone's stderr without surrounding whitespace.
 fn strip(text: &str) -> &str {
-    am_core::py::strip(text)
+    am_core::format::strip(text)
 }
 
-/// Port of `storage.offload`.
+/// Copy a path to the remote and check the copy, record it in the manifest, and unless
+/// `keep_local`, replace it with a `.offloaded` stub.
 pub fn offload(path_text: &str, note: &str, keep_local: bool) -> Result<Value> {
     let path = projects::resolve(&am_core::expand_user(path_text));
     if !util::exists(&path) {
@@ -165,7 +166,8 @@ pub fn offload(path_text: &str, note: &str, keep_local: bool) -> Result<Value> {
     Ok(entry)
 }
 
-/// Port of `storage.restore`.
+/// Bring an offloaded path back from the remote, remove its stub, and mark it restored in
+/// the manifest.
 pub fn restore(path_text: &str) -> Result<Value> {
     let raw = path_text.strip_suffix(STUB_SUFFIX).unwrap_or(path_text);
     let path = projects::resolve(&am_core::expand_user(raw));
@@ -196,7 +198,8 @@ pub fn restore(path_text: &str) -> Result<Value> {
     Ok(entry)
 }
 
-/// `shlex.quote`.
+/// `s` quoted for a POSIX shell: as it is if it's only ASCII letters, digits and
+/// `@%+=:,./-_`, else in single quotes with each `'` as `'"'"'`; empty as `''`.
 pub fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".into();
@@ -207,24 +210,24 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
-/// Port of `storage.connect_command`: the one command Connect may run for this provider,
-/// with rclone named by the full path the daemon finds.
+/// The one command Connect may run for this provider, with rclone named by the full path
+/// the daemon finds.
 pub fn connect_command(provider: &str) -> Option<String> {
     let (_, _, args) = PROVIDERS.iter().find(|(name, _, _)| *name == provider)?;
     let bin = am_store::setup::which("rclone").map_or("rclone".to_string(), |p| p.to_string_lossy().into_owned());
     Some(std::iter::once(bin.as_str()).chain(args.iter().copied()).map(shell_quote).collect::<Vec<_>>().join(" "))
 }
 
-/// Port of `storage.connected`: after its command succeeded, point [storage] at the new
-/// remote. True if config.toml changed.
+/// After its command succeeded, point [storage] at the new remote. True if config.toml
+/// changed.
 pub fn connected(provider: &str) -> Result<bool> {
     let Some((_, remote, _)) = PROVIDERS.iter().find(|(name, _, _)| *name == provider) else {
-        return util::crash(format!("KeyError: {}", util::repr(provider)));
+        return util::crash(format!("KeyError: {}", util::quote(provider)));
     };
     am_core::config::set_string("storage", "rclone_remote", remote)
 }
 
-/// Port of `storage.status`: what the Storage section of Settings shows. Reads files only.
+/// What the Storage section of Settings shows. Reads files only.
 pub fn status(cfg: Option<&Value>) -> Result<Value> {
     let cfg = load(cfg)?;
     let remote = storage_str(&cfg, "rclone_remote").trim_end_matches(':').to_string();
@@ -253,7 +256,7 @@ pub fn status(cfg: Option<&Value>) -> Result<Value> {
             e
         })
         .collect();
-    // Python's sum() starts from 0; Rust's f64 sum of nothing is -0.0, which prints "-0 B".
+    // Folded from 0.0: an f64 sum of nothing is -0.0, which would print as "-0 B".
     let removed = entries.iter().filter(|e| has(e, "local_removed")).map(|e| util::num(get(e, "bytes")).unwrap_or(0.0)).fold(0.0, |a, b| a + b);
     Ok(json!({
         "remote": remote,
@@ -268,7 +271,7 @@ pub fn status(cfg: Option<&Value>) -> Result<Value> {
     }))
 }
 
-/// Port of `storage.list_entries`: newest first.
+/// The manifest's entries, newest first.
 pub fn list_entries() -> Result<Vec<Value>> {
     let data = read_json(&manifest())?.unwrap_or_else(util::empty);
     let mut entries: Vec<Value> = data.as_object().map(|m| m.values().cloned().collect()).unwrap_or_default();
@@ -279,7 +282,7 @@ pub fn list_entries() -> Result<Vec<Value>> {
     Ok(entries)
 }
 
-/// `storage._size`: a file's size, or the total of a directory's files.
+/// A file's size, or the total of a directory's files.
 fn size_of(path: &Path) -> u64 {
     if path.is_file() {
         return std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -289,7 +292,7 @@ fn size_of(path: &Path) -> u64 {
     total
 }
 
-/// `os.walk(path)`'s files, not following symlinked directories.
+/// Every file under `dir`, not following symlinked directories.
 pub(crate) fn walk_files(dir: &Path, f: &mut dyn FnMut(&Path)) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut dirs = Vec::new();
@@ -308,7 +311,8 @@ pub(crate) fn walk_files(dir: &Path, f: &mut dyn FnMut(&Path)) {
     }
 }
 
-/// Port of `storage.human_size`.
+/// A byte count in B, KB, MB, GB or TB (steps of 1024): bytes whole, the rest to one
+/// decimal.
 pub fn human_size(n: f64) -> String {
     let mut n = n;
     for unit in ["B", "KB", "MB", "GB", "TB"] {
@@ -326,7 +330,8 @@ pub const STATE_FILE: &str = "offload.json";
 pub const NOT_BACKED_UP: [&str; 4] = ["project.json.lock", STATE_FILE, "offload.json.lock", ".changed"];
 pub const STUB_FILES: [&str; 5] = ["project.json", "project.json.lock", STATE_FILE, "offload.json.lock", ".changed"];
 
-/// Port of `storage.remote_label`.
+/// The storage remote as named to the user: "Google Drive" for the Drive remote, else
+/// the rclone remote's name.
 pub fn remote_label(cfg: Option<&Value>) -> Result<String> {
     let cfg = load(cfg)?;
     let remote = storage_str(&cfg, "rclone_remote").trim_end_matches(':').to_string();
@@ -338,11 +343,11 @@ pub(crate) fn state_path(slug: &str) -> PathBuf {
     project_dir(slug).join(STATE_FILE)
 }
 
-/// `storage._alive`.
+/// Whether a job's recorded pid is a live process.
 pub(crate) fn alive(pid: Option<&Value>) -> bool {
     let pid = match pid {
         Some(Value::Number(n)) => n.as_i64(),
-        Some(Value::String(t)) => am_core::py::parse_int(t),
+        Some(Value::String(t)) => am_core::format::parse_int(t),
         Some(Value::Bool(b)) => Some(*b as i64),
         _ => None,
     };
@@ -352,22 +357,22 @@ pub(crate) fn alive(pid: Option<&Value>) -> bool {
     }
 }
 
-/// Port of `storage.offloaded_info`.
+/// The project's `offloaded` record, or null.
 pub fn offloaded_info(slug: &str) -> Result<Value> {
     Ok(get(&projects::get_project(slug)?, "offloaded").cloned().unwrap_or(Value::Null))
 }
 
-/// Port of `storage.is_offloaded`.
+/// Whether the project is offloaded.
 pub fn is_offloaded(slug: &str) -> Result<bool> {
-    Ok(am_core::py::truthy(Some(&offloaded_info(slug)?)))
+    Ok(am_core::format::truthy(Some(&offloaded_info(slug)?)))
 }
 
-/// `Path.home()`.
+/// The user's home directory.
 pub(crate) fn user_home() -> PathBuf {
     am_core::expand_user("~")
 }
 
-/// Port of `storage.session_files`: each agent's CLI session and its files under $HOME.
+/// Each agent's CLI session and its files under $HOME.
 pub fn session_files(slug: &str) -> Result<Vec<Value>> {
     let home = user_home();
     let mut out = Vec::new();
@@ -414,7 +419,8 @@ pub fn session_files(slug: &str) -> Result<Vec<Value>> {
     Ok(out)
 }
 
-/// `Path.rglob(f"rollout-*{sid}.jsonl")`.
+/// Files named `rollout-*<sid>.jsonl` anywhere under `dir`, not following symlinked
+/// directories.
 fn rglob_rollouts(dir: &Path, sid: &str, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -430,7 +436,7 @@ fn rglob_rollouts(dir: &Path, sid: &str, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// `storage._files_and_bytes`.
+/// How many files a path holds and their total size; a file or a symlink is one.
 pub(crate) fn files_and_bytes(path: &Path) -> (u64, u64) {
     let link = std::fs::symlink_metadata(path);
     if path.is_file() || link.as_ref().is_ok_and(|m| m.file_type().is_symlink()) {
@@ -444,14 +450,14 @@ pub(crate) fn files_and_bytes(path: &Path) -> (u64, u64) {
     (count, total)
 }
 
-/// `storage._project_children`: the project's top-level entries, sorted, without `keep`.
+/// The project's top-level entries, sorted, without `keep`.
 pub(crate) fn project_children(slug: &str, keep: &[&str]) -> Result<Vec<PathBuf>> {
     let mut names: Vec<String> = am_core::fsx::listdir(&project_dir(slug))?.into_iter().filter(|n| !keep.contains(&n.as_str())).collect();
     names.sort();
     Ok(names.into_iter().map(|n| project_dir(slug).join(n)).collect())
 }
 
-/// Port of `storage.project_plan`: what an offload would upload.
+/// What an offload would upload.
 pub fn project_plan(slug: &str) -> Result<Value> {
     let (mut files, mut total) = (0, 0);
     for child in project_children(slug, &NOT_BACKED_UP)? {
@@ -481,15 +487,15 @@ pub fn project_plan(slug: &str) -> Result<Value> {
     }))
 }
 
-/// Port of `storage.project_status`: what Settings, the stub page and the sidebar show.
+/// What Settings, the stub page and the sidebar show.
 pub fn project_status(slug: &str) -> Result<Value> {
-    let state = read_json(&state_path(slug))?.filter(|s| am_core::py::truthy(Some(s))).unwrap_or_else(util::empty);
+    let state = read_json(&state_path(slug))?.filter(|s| am_core::format::truthy(Some(s))).unwrap_or_else(util::empty);
     let mut job = get(&state, "job").cloned().unwrap_or(Value::Null);
-    if am_core::py::truthy(Some(&job)) && !alive(get(&job, "pid")) {
+    if am_core::format::truthy(Some(&job)) && !alive(get(&job, "pid")) {
         job = Value::Null; // Its process ended without finishing, such as a daemon restart.
     }
     let info = offloaded_info(slug)?;
-    let shown = if am_core::py::truthy(Some(&info)) {
+    let shown = if am_core::format::truthy(Some(&info)) {
         let mut i = info.clone();
         let size = human_size(util::num(get(&info, "bytes")).unwrap_or(0.0));
         util::fields(&mut i).insert("size".into(), size.into());
@@ -498,7 +504,7 @@ pub fn project_status(slug: &str) -> Result<Value> {
         info.clone()
     };
     Ok(json!({
-        "offloaded": am_core::py::truthy(Some(&info)),
+        "offloaded": am_core::format::truthy(Some(&info)),
         "info": shown,
         "job": job,
         "error": get(&state, "error").cloned().unwrap_or(Value::Null),

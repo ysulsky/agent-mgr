@@ -8,14 +8,14 @@ pub const HOME_DESCRIPTION: &str = "The home manager: the first point of contact
 
 /// The binary agents should run: this one.
 /// This binary, with symlinks resolved, so the shim names this exact install even when
-/// it was run as `~/.local/bin/am`, a link that a switch of implementation repoints.
+/// it was run as `~/.local/bin/am`, a link that may later be repointed.
 pub fn this_binary() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("am"));
     exe.canonicalize().unwrap_or(exe)
 }
 
-/// Port of `setup.write_shim`: `$AM_HOME/bin/am`, put first on a turn's PATH, so agents
-/// find this exact install whatever the daemon's own PATH holds. It execs this binary.
+/// Write `$AM_HOME/bin/am`, put first on a turn's PATH, so agents find this exact
+/// install whatever the daemon's own PATH holds. It execs this binary.
 pub fn write_shim() -> Result<()> {
     let shim = am_home().join("bin").join("am");
     let text = format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", this_binary().display());
@@ -23,7 +23,7 @@ pub fn write_shim() -> Result<()> {
     Ok(())
 }
 
-/// Port of `setup.run`: what was created, and any warnings.
+/// Set up `AM_HOME`: returns what was created, and any warnings.
 pub fn run() -> Result<(Vec<String>, Vec<String>)> {
     let mut created = Vec::new();
     let home = am_home();
@@ -57,7 +57,7 @@ pub fn run() -> Result<(Vec<String>, Vec<String>)> {
     Ok((created, warnings()?))
 }
 
-/// `shutil.which(name)`: a path with a slash is checked as it is; otherwise each
+/// Find a runnable program: a path with a slash is checked as it is; otherwise each
 /// directory of $PATH in turn.
 pub fn which(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
@@ -76,7 +76,6 @@ pub fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// `setup._warnings`.
 fn warnings() -> Result<Vec<String>> {
     let cfg = config::load()?;
     let mut out = Vec::new();
@@ -97,13 +96,12 @@ fn warnings() -> Result<Vec<String>> {
     if which("tmux").is_none() {
         out.push("tmux is not on your PATH, so terminals in the UI won't work. On a Mac: brew install tmux".into());
     }
-    if am_core::py::truthy(cfg["storage"].get("rclone_remote")) && which("rclone").is_none() {
+    if am_core::format::truthy(cfg["storage"].get("rclone_remote")) && which("rclone").is_none() {
         out.push("A storage remote is configured but rclone isn't installed. On a Mac: brew install rclone".into());
     }
     Ok(out)
 }
 
-/// Port of `setup.is_set_up`.
 pub fn is_set_up() -> bool {
     util::exists(&config_path()) && projects::exists(HOME_SLUG)
 }

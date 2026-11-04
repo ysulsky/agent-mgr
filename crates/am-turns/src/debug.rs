@@ -1,9 +1,9 @@
-//! The bodies of this crate's `am __debug` commands (the table is in the `am` binary's
-//! `debug.rs`; Python's are in `src/am/_debug.py`). `run` answers None for a command
+//! The bodies of this crate's `am __debug` commands, test hooks for end-to-end tests
+//! (the table is in the `am` binary's `debug.rs`). `run` answers None for a command
 //! that isn't this crate's.
 
 use crate::runner::Runner;
-use crate::{procs, prompts, pyv, scheduler, store};
+use crate::{procs, prompts, convert, scheduler, store};
 use am_core::{Result, Value};
 use serde_json::json;
 use std::io::{BufRead, Write};
@@ -54,7 +54,7 @@ fn tick() -> Result<()> {
 }
 
 /// A daemon holds `daemon/lock` for its whole life. The ticker checks it but doesn't
-/// keep it, as a Python `Runner` in a test takes no lock at all.
+/// take it, as a `Runner` driven by a test takes no lock at all.
 fn daemon_running() -> bool {
     let lock = am_core::daemon_dir().join("lock");
     if !lock.exists() {
@@ -118,7 +118,7 @@ fn system_prompt(rest: &[String]) -> Result<()> {
 
 fn strings(v: Option<&Value>) -> Vec<String> {
     match v {
-        Some(Value::Array(a)) => a.iter().map(pyv::str_of).collect(),
+        Some(Value::Array(a)) => a.iter().map(convert::text).collect(),
         _ => vec![],
     }
 }
@@ -130,29 +130,29 @@ fn values_list(v: Option<&Value>) -> Vec<Value> {
 fn turn_prompt(rest: &[String]) -> Result<()> {
     let (slug, name) = (arg(rest, 0)?, arg(rest, 1)?);
     let values = json_arg(rest, 2)?;
-    let side = am_core::py::truthy(values.get("side"));
-    let history = values.get("history").map_or_else(String::new, pyv::str_of);
+    let side = am_core::format::truthy(values.get("side"));
+    let history = values.get("history").map_or_else(String::new, convert::text);
     let text = prompts::turn_prompt(slug, &store::get_agent(slug, name)?, &values_list(values.get("messages")), &strings(values.get("notes")), side, &history)?;
     out(&text);
     Ok(())
 }
 
 /// `runner-call METHOD JSON`: a Runner's note- and routing-making steps on made-up turns,
-/// for the prompt goldens.
+/// so tests can check the text they write.
 fn runner_call(rest: &[String]) -> Result<()> {
     let method = arg(rest, 0)?;
     let values = json_arg(rest, 1)?;
     let mut runner = Runner::new(None)?;
-    let slug = pyv::str_of(&values["slug"]);
-    let name = pyv::str_of(&values["agent"]);
+    let slug = convert::text(&values["slug"]);
+    let name = convert::text(&values["agent"]);
     let messages = values_list(values.get("messages"));
     let meta = values.get("meta").cloned().unwrap_or(json!({}));
     let mut result = values.get("result").cloned().unwrap_or(json!({}));
     match method {
         "start-main" => {
             runner.debug.dry_launch = true;
-            if am_core::py::truthy(values.get("proc")) {
-                runner.debug.process = Some(PathBuf::from(pyv::str_of(&values["proc"])));
+            if am_core::format::truthy(values.get("proc")) {
+                runner.debug.process = Some(PathBuf::from(convert::text(&values["proc"])));
             }
             let agent = store::get_agent(&slug, &name)?;
             runner.debug_start_main(&slug, &name, &agent, &messages)?;
@@ -174,8 +174,7 @@ fn proc_shutdown(rest: &[String]) -> Result<()> {
     procs::shutdown(Path::new(arg(rest, 0)?), rest.get(1).map_or("test", String::as_str))
 }
 
-/// `fix-costs [--dry-run]`: what `am fix-costs` prints, from this crate's costfix, for
-/// checking it against Python's before the CLI calls it.
+/// `fix-costs [--dry-run]`: what `am fix-costs` prints, straight from this crate's costfix.
 fn fix_costs(rest: &[String]) -> Result<()> {
     let report = crate::costfix::run(rest.iter().any(|a| a == "--dry-run"))?;
     out(&(crate::costfix::format_report(&report)? + "\n"));

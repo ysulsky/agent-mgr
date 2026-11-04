@@ -1,6 +1,6 @@
 //! Test hooks. When `AM_TEST_HOOKS` names a JSON file, a few readings come from it instead
 //! of the machine, read afresh on every use so a test can change them mid-run. Without the
-//! variable nothing here has any effect. The Python implementation honours the same file.
+//! variable nothing here has any effect.
 //!
 //! Keys: `now_offset` and `awake_offset` (seconds added to the clocks), `disk_percent`,
 //! `memory_percent` (a number, or null for "unknown"), `login_timeout`, `checking_for`,

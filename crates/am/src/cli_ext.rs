@@ -1,10 +1,10 @@
-//! `cli.py`'s commands that drive other crates: the daemon (am-server), health and
+//! The commands that drive other crates: the daemon (am-server), health and
 //! storage (am-ops), costs and schedules (am-turns). The printing is here; the work is
 //! theirs.
 
-use crate::argparse::Namespace;
+use crate::args::Parsed;
 use crate::cli::{ago, offloaded_info, require_setup, say, Out};
-use am_core::{am_err, now, py, Result, Value};
+use am_core::{am_err, now, format, Result, Value};
 use am_server::daemon;
 use am_store::util::{get, has, num, s};
 use am_store::projects;
@@ -17,7 +17,7 @@ fn flush(out: &mut Out) {
     out.clear();
 }
 
-pub fn cmd_daemon(ns: &Namespace, out: &mut Out) -> Result<()> {
+pub fn cmd_daemon(ns: &Parsed, out: &mut Out) -> Result<()> {
     require_setup()?;
     match ns.str("action").unwrap_or_default() {
         "start" => {
@@ -53,9 +53,9 @@ pub fn cmd_url(out: &mut Out) -> Result<()> {
     Ok(())
 }
 
-/// `_until(ts)`.
+/// How long until `ts`: `due now`, `in 5m`, `in 3h`, or `-` for none.
 fn until(ts: Option<&Value>) -> String {
-    if !py::truthy(ts) {
+    if !format::truthy(ts) {
         return "-".into();
     }
     let seconds = (num(ts).unwrap_or(0.0) - now()).trunc() as i64;
@@ -72,7 +72,7 @@ fn list<'a>(v: &'a Value, key: &str) -> &'a [Value] {
     get(v, key).and_then(Value::as_array).map_or(&[], Vec::as_slice)
 }
 
-/// `_print_health`.
+/// The health snapshot as `am health` prints it.
 fn print_health(snapshot: &Value, out: &mut Out) {
     say(out, format!("Health: {}", s(&snapshot["summary"], "label")));
     say(out, "\nLogins");
@@ -130,7 +130,7 @@ fn print_health(snapshot: &Value, out: &mut Out) {
     }
 }
 
-pub fn cmd_health(ns: &Namespace, out: &mut Out) -> Result<()> {
+pub fn cmd_health(ns: &Parsed, out: &mut Out) -> Result<()> {
     use am_ops::health;
     require_setup()?;
     let cfg = am_core::config::load()?;
@@ -140,14 +140,14 @@ pub fn cmd_health(ns: &Namespace, out: &mut Out) -> Result<()> {
     }
     let snapshot = health::snapshot(Some(&cfg))?;
     if ns.flag("json") {
-        say(out, am_core::json::dumps_with(&snapshot, Some(1), true));
+        say(out, am_core::json::encode_with(&snapshot, Some(1), true));
     } else {
         print_health(&snapshot, out);
     }
     Ok(())
 }
 
-pub fn cmd_fix_costs(ns: &Namespace, out: &mut Out) -> Result<()> {
+pub fn cmd_fix_costs(ns: &Parsed, out: &mut Out) -> Result<()> {
     use am_turns::costfix;
     require_setup()?;
     let dry_run = ns.flag("dry_run");
@@ -158,7 +158,7 @@ pub fn cmd_fix_costs(ns: &Namespace, out: &mut Out) -> Result<()> {
     Ok(())
 }
 
-/// `storage.human_size`.
+/// As `am_ops::storage::human_size`: a byte count as `512 B`, `1.5 KB`, ... `TB`.
 pub fn human_size(n: Option<&Value>) -> String {
     let mut n = num(n).unwrap_or(0.0);
     for unit in ["B", "KB", "MB", "GB", "TB"] {
@@ -170,7 +170,7 @@ pub fn human_size(n: Option<&Value>) -> String {
     format!("{n:.1} TB")
 }
 
-pub fn cmd_storage(ns: &Namespace, out: &mut Out) -> Result<()> {
+pub fn cmd_storage(ns: &Parsed, out: &mut Out) -> Result<()> {
     use am_ops::storage;
     match ns.str("action").unwrap_or_default() {
         "offload" => {
@@ -205,11 +205,11 @@ pub fn cmd_storage(ns: &Namespace, out: &mut Out) -> Result<()> {
     Ok(())
 }
 
-/// `cli._offload`.
+/// `am project offload`.
 pub fn offload(slug: &str, out: &mut Out) -> Result<()> {
     use am_ops::storage;
     let info = offloaded_info(slug)?;
-    if py::truthy(Some(&info)) && projects::agent_names(slug)?.is_empty() {
+    if format::truthy(Some(&info)) && projects::agent_names(slug)?.is_empty() {
         say(out, format!("{slug} is already offloaded, to {}.", s(&info, "remote")));
         return Ok(());
     }
@@ -233,14 +233,14 @@ pub fn offload(slug: &str, out: &mut Out) -> Result<()> {
     Ok(())
 }
 
-/// `cli._restore`.
+/// `am project restore`.
 pub fn restore(slug: &str, out: &mut Out) -> Result<()> {
     let info = offloaded_info(slug)?;
-    if !py::truthy(Some(&info)) {
+    if !format::truthy(Some(&info)) {
         say(out, format!("{slug} isn't offloaded."));
         return Ok(());
     }
-    let size = get(&info, "archive_bytes").filter(|v| py::truthy(Some(v)));
+    let size = get(&info, "archive_bytes").filter(|v| format::truthy(Some(v)));
     say(out, format!("Restoring {slug} from {} ({})...", s(&info, "remote"), human_size(size)));
     flush(out);
     restore_project(slug, false)?;
@@ -248,13 +248,13 @@ pub fn restore(slug: &str, out: &mut Out) -> Result<()> {
     Ok(())
 }
 
-/// `storage.restore_project(slug, unarchive=...)`.
+/// `am_ops::storage::restore_project`, un-archiving too if `unarchive`.
 pub fn restore_project(slug: &str, unarchive: bool) -> Result<()> {
     am_ops::storage::restore_project(slug, unarchive)?;
     Ok(())
 }
 
-/// `scheduler.run_now`.
+/// `am_turns::scheduler::run_now`: deliver a schedule now.
 pub fn run_schedule_now(slug: &str, name: &str) -> Result<()> {
     am_turns::scheduler::run_now(slug, name)
 }

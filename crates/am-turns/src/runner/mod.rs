@@ -6,15 +6,14 @@
 //! turns just by reading the disk. Every effect of finishing a turn can be repeated
 //! safely, since derived messages have ids computed from the turn's id.
 //!
-//! The port is split by the Python file's sections: `start` (starting turns and
-//! long-lived processes), `watch` (watching turns) and `finish` (finishing turns, and
-//! when they go wrong).
+//! The runner is split in three: `start` (starting turns and long-lived processes),
+//! `watch` (watching turns) and `finish` (finishing turns, and when they go wrong).
 
 mod finish;
 mod start;
 mod watch;
 
-use crate::{log, procs, pyv, store};
+use crate::{log, procs, convert, store};
 use am_core::{agent_dir, am_home, now, write_json, Result, Value};
 use regex::Regex;
 use serde_json::json;
@@ -58,7 +57,7 @@ fn session_re() -> &'static Regex {
     re(&RE, r"(?i)no conversation found|session .*not found|no rollout|thread .*not found|could not find (session|thread)")
 }
 
-/// `Path.home()`: `$HOME`, else the password database.
+/// The user's home directory: `$HOME`, else the password database.
 fn home_dir() -> String {
     if let Some(h) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
         return h.to_string_lossy().into_owned();
@@ -155,7 +154,7 @@ pub struct DebugHooks {
     pub process: Option<PathBuf>,
 }
 
-/// `runner.Runner`.
+/// The runner. Each `tick` takes one step for every agent.
 pub struct Runner {
     cfg: Value,
     children: Vec<Child>,
@@ -239,7 +238,7 @@ impl Runner {
         }
         self.enforce_time_limit(slug, name, &agent, &mut running)?;
         self.record_strays(slug, name)?;
-        if am_core::py::truthy(agent.get("retired")) {
+        if am_core::format::truthy(agent.get("retired")) {
             if let Some(i) = main {
                 self.stop(slug, name, &mut running[i])?;
             }
@@ -259,7 +258,7 @@ impl Runner {
         if let Some(i) = main {
             self.learn_session(slug, name, &agent, &running[i])?;
             let role = as_str(&agent, "role");
-            if pending.iter().any(|m| am_core::py::truthy(m.get("interrupt"))) {
+            if pending.iter().any(|m| am_core::format::truthy(m.get("interrupt"))) {
                 self.stop(slug, name, &mut running[i])?;
             } else if role == "manager" {
                 self.auto_interrupt(slug, name, &mut running[i], &pending)?;
@@ -269,11 +268,11 @@ impl Runner {
             }
             return Ok(());
         }
-        if !pending.iter().any(|m| m.get("wake").is_none_or(|w| am_core::py::truthy(Some(w)))) {
+        if !pending.iter().any(|m| m.get("wake").is_none_or(|w| am_core::format::truthy(Some(w)))) {
             return Ok(());
         }
-        let interrupting = pending.iter().any(|m| am_core::py::truthy(m.get("interrupt")));
-        let not_before = agent.get("not_before").map_or(0.0, pyv::py_float);
+        let interrupting = pending.iter().any(|m| am_core::format::truthy(m.get("interrupt")));
+        let not_before = agent.get("not_before").map_or(0.0, convert::to_float);
         if not_before > now() && !interrupting {
             return Ok(());
         }
@@ -282,8 +281,8 @@ impl Runner {
 
     /// A duration from [runner], or None when it's "off" (or "0", unless zero is allowed).
     fn seconds(&self, key: &str, allow_zero: bool) -> Option<f64> {
-        let raw = self.cfg["runner"].get(key).map_or_else(|| "off".to_string(), pyv::str_of);
-        let text = am_core::py::strip(&raw);
+        let raw = self.cfg["runner"].get(key).map_or_else(|| "off".to_string(), convert::text);
+        let text = am_core::format::strip(&raw);
         if text == "off" || text.is_empty() {
             return None;
         }
@@ -291,7 +290,7 @@ impl Runner {
             Ok(seconds) if seconds > 0.0 || allow_zero => Some(seconds),
             Ok(_) => None,
             Err(_) => {
-                log::warning(LOG, &format!("ignoring runner.{key} = {}", am_core::py::repr(text)));
+                log::warning(LOG, &format!("ignoring runner.{key} = {}", am_core::format::quote(text)));
                 None
             }
         }
@@ -305,7 +304,7 @@ impl Runner {
 }
 
 /// Entry points for `am __debug runner-call`, which drives single steps of a Runner on
-/// made-up turns, as Python's prompt goldens call its methods.
+/// made-up turns, so tests can check the text they write.
 #[doc(hidden)]
 impl Runner {
     pub fn debug_start_main(&mut self, slug: &str, name: &str, agent: &Value, pending: &[Value]) -> Result<()> {
@@ -331,7 +330,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classify_failure_as_python() {
+    fn classify_failure_kinds() {
         assert_eq!(classify_failure("No conversation found with session ID: x"), "session");
         assert_eq!(classify_failure("no rollout found for thread id y"), "session");
         assert_eq!(classify_failure("Not logged in · Please run /login"), "auth");

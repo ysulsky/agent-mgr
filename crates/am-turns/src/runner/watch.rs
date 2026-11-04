@@ -1,7 +1,7 @@
-//! Watching turns (`runner.py`, "watching turns").
+//! Watching turns.
 
 use super::{as_str, Runner, LOG, SPAWN_WINDOW_SECONDS};
-use crate::{backends, log, procs, pyv, store, sys};
+use crate::{backends, log, procs, convert, store, sys};
 use am_core::{active_dir, awake_time, now, read_json, turn_dir, write_json, Result, Value};
 use serde_json::json;
 use std::path::Path;
@@ -32,9 +32,9 @@ impl Runner {
             if as_str(&meta, "state") == "preparing" && directory.join("pid.json").exists() {
                 // The daemon died between handing the turn over and recording that it had:
                 // it's running, so it isn't abandoned.
-                let pid = read(&directory.join("pid.json")).filter(|p| am_core::py::truthy(Some(p))).unwrap_or(json!({}));
+                let pid = read(&directory.join("pid.json")).filter(|p| am_core::format::truthy(Some(p))).unwrap_or(json!({}));
                 meta["state"] = json!("spawned");
-                if am_core::py::truthy(pid.get("proc")) {
+                if am_core::format::truthy(pid.get("proc")) {
                     meta["proc"] = pid["proc"].clone();
                 }
                 write_json(&directory.join("meta.json"), &meta)?;
@@ -45,14 +45,14 @@ impl Runner {
             }
             let exit_info = read(&directory.join("exit.json")).filter(|e| !e.is_null());
             if let Some(exit_info) = &exit_info {
-                if am_core::py::truthy(exit_info.get("never_ran")) {
+                if am_core::format::truthy(exit_info.get("never_ran")) {
                     self.abandon_prepared(slug, name, &meta)?;
                 } else {
                     self.finish(slug, name, &meta, exit_info)?;
                 }
                 continue;
             }
-            if am_core::py::truthy(meta.get("proc")) && !directory.join("pid.json").exists() && !self.proc_alive(slug, name, &meta) {
+            if am_core::format::truthy(meta.get("proc")) && !directory.join("pid.json").exists() && !self.proc_alive(slug, name, &meta) {
                 self.abandon_prepared(slug, name, &meta)?; // Its process ended before taking it.
                 continue;
             }
@@ -73,7 +73,7 @@ impl Runner {
         if !directory.join("pid.json").exists() {
             // The supervisor takes the lock before writing pid.json. Don't touch the lock
             // until it has had time to, or we could make it think it lost a race.
-            return now() - meta.get("created").map_or(0.0, pyv::py_float) < SPAWN_WINDOW_SECONDS;
+            return now() - meta.get("created").map_or(0.0, convert::to_float) < SPAWN_WINDOW_SECONDS;
         }
         sys::try_lock(&directory.join("alive.lock")).is_none()
     }
@@ -84,7 +84,7 @@ impl Runner {
     }
 
     fn proc_alive(&self, slug: &str, name: &str, meta: &Value) -> bool {
-        let directory = procs::procs_dir(slug, name).join(pyv::str_of(&meta["proc"]));
+        let directory = procs::procs_dir(slug, name).join(convert::text(&meta["proc"]));
         procs::alive(&directory) && !directory.join("exit.json").exists()
     }
 
@@ -93,10 +93,10 @@ impl Runner {
     pub(crate) fn abandon_prepared(&self, slug: &str, name: &str, meta: &Value) -> Result<()> {
         if let Some(Value::Array(ids)) = meta.get("messages") {
             for id in ids {
-                store::requeue(slug, name, &pyv::str_of(id), false)?;
+                store::requeue(slug, name, &convert::text(id), false)?;
             }
         }
-        if am_core::py::truthy(meta.get("notes")) && as_str(meta, "kind") == "main" {
+        if am_core::format::truthy(meta.get("notes")) && as_str(meta, "kind") == "main" {
             let notes = meta["notes"].as_array().cloned().unwrap_or_default();
             store::update_agent(slug, name, |a| {
                 let mut merged = notes.clone();
@@ -112,7 +112,7 @@ impl Runner {
     }
 
     pub(crate) fn learn_session(&self, slug: &str, name: &str, agent: &Value, main: &Value) -> Result<()> {
-        if let Some(record) = agent.get("session").filter(|r| am_core::py::truthy(Some(r))) {
+        if let Some(record) = agent.get("session").filter(|r| am_core::format::truthy(Some(r))) {
             if record.get("backend") == main.get("backend") {
                 return Ok(());
             }
@@ -130,19 +130,19 @@ impl Runner {
 
     pub(crate) fn stop(&self, slug: &str, name: &str, meta: &mut Value) -> Result<()> {
         let directory = turn_dir(slug, name, as_str(meta, "id"));
-        let Some(pid) = read(&directory.join("pid.json")).filter(|p| am_core::py::truthy(Some(p))) else {
+        let Some(pid) = read(&directory.join("pid.json")).filter(|p| am_core::format::truthy(Some(p))) else {
             return Ok(()); // Still starting; the next tick tries again.
         };
         if !directory.join("interrupt.json").exists() {
             write_json(&directory.join("interrupt.json"), &json!({"at": now()}))?;
         }
-        if now() - meta.get("stop_sent").map_or(0.0, pyv::py_float) < 5.0 {
+        if now() - meta.get("stop_sent").map_or(0.0, convert::to_float) < 5.0 {
             return Ok(());
         }
         meta["stopping"] = json!(true);
         meta["stop_sent"] = json!(now());
         write_json(&directory.join("meta.json"), meta)?;
-        if !am_core::py::truthy(meta.get("proc")) {
+        if !am_core::format::truthy(meta.get("proc")) {
             // A long-lived process's supervisor watches for interrupt.json instead: a
             // signal would stop the whole process, not just this turn.
             if let Some(sup) = pid.get("supervisor").and_then(Value::as_i64) {
@@ -164,14 +164,14 @@ impl Runner {
         let role = if as_str(agent, "role") == "manager" { "manager" } else { "worker" };
         let key = format!("{role}_turn_limit");
         let Some(limit) = self.seconds(&key, false) else { return Ok(()) };
-        let text = pyv::str_of(&self.cfg["runner"][key.as_str()]);
+        let text = convert::text(&self.cfg["runner"][key.as_str()]);
         for meta in running.iter_mut() {
             match self.awake_elapsed(slug, name, meta)? {
                 Some(elapsed) if elapsed >= limit => {}
                 _ => continue,
             }
-            if !am_core::py::truthy(meta.get("time_limit")) {
-                meta["time_limit"] = json!({"seconds": pyv::float_value(limit), "text": text, "role": role});
+            if !am_core::format::truthy(meta.get("time_limit")) {
+                meta["time_limit"] = json!({"seconds": convert::float_value(limit), "text": text, "role": role});
                 log::info(LOG, &format!("turn {} of {slug}/{name} hit the {text} limit", as_str(meta, "id")));
             }
             self.stop(slug, name, meta)?;
@@ -187,8 +187,8 @@ impl Runner {
     /// doesn't start its clock again.
     fn awake_elapsed(&self, slug: &str, name: &str, meta: &mut Value) -> Result<Option<f64>> {
         let directory = turn_dir(slug, name, as_str(meta, "id"));
-        let pid = read(&directory.join("pid.json")).filter(|p| am_core::py::truthy(Some(p))).unwrap_or(json!({}));
-        if !am_core::py::truthy(pid.get("started")) {
+        let pid = read(&directory.join("pid.json")).filter(|p| am_core::format::truthy(Some(p))).unwrap_or(json!({}));
+        if !am_core::format::truthy(pid.get("started")) {
             return Ok(None);
         }
         let started = match pid.get("awake_started") {
@@ -200,7 +200,7 @@ impl Runner {
             write_json(&directory.join("meta.json"), meta)?;
             return Ok(Some(0.0));
         }
-        let elapsed = awake_time() - pyv::py_float(&started);
+        let elapsed = awake_time() - convert::to_float(&started);
         // Recorded before a reboot, so it isn't running.
         Ok(if elapsed >= 0.0 { Some(elapsed) } else { None })
     }
@@ -211,7 +211,7 @@ impl Runner {
     /// are delivered again with the user's, which goes first.
     pub(crate) fn auto_interrupt(&self, slug: &str, name: &str, main: &mut Value, pending: &[Value]) -> Result<()> {
         let Some(grace) = self.seconds("auto_interrupt_after", true) else { return Ok(()) };
-        if am_core::py::truthy(main.get("stopping")) {
+        if am_core::format::truthy(main.get("stopping")) {
             return Ok(());
         }
         if let Some(Value::Array(triggers)) = main.get("triggers") {
@@ -221,7 +221,7 @@ impl Runner {
         }
         let waiting: Vec<&Value> = pending
             .iter()
-            .filter(|m| as_str(m, "kind") == "user" && now() - pyv::py_float_or0(m.get("ts")) >= grace)
+            .filter(|m| as_str(m, "kind") == "user" && now() - convert::to_float_or0(m.get("ts")) >= grace)
             .collect();
         if waiting.is_empty() {
             return Ok(());
@@ -232,7 +232,7 @@ impl Runner {
         for message in &waiting {
             store::mark_interrupt(slug, name, as_str(message, "id"))?;
         }
-        let list: Vec<String> = waiting.iter().map(|m| pyv::str_of(&m["id"])).collect();
+        let list: Vec<String> = waiting.iter().map(|m| convert::text(&m["id"])).collect();
         log::info(LOG, &format!("interrupting {slug}/{name}'s turn {} for {}", as_str(main, "id"), list.join(", ")));
         self.stop(slug, name, main)
     }

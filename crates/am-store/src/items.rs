@@ -2,7 +2,7 @@
 
 use crate::localtime;
 use crate::projects;
-use crate::util::{self, get, has, now_value, repr};
+use crate::util::{self, get, has, now_value, quote};
 use am_core::{
     am_err, attention_dir, check_item_id, format_duration, list_json_ids, new_id, parse_duration, poke, project_dir,
     read_json, update_json, write_json, Result, Value,
@@ -23,7 +23,6 @@ fn tasks_default() -> Value {
     json!({"next": 1, "items": []})
 }
 
-/// Port of `items.list_tasks`.
 pub fn list_tasks(slug: &str, include_done: bool) -> Result<Vec<Value>> {
     let data = read_json(&tasks_path(slug))?.unwrap_or_else(tasks_default);
     let Some(Value::Array(tasks)) = get(&data, "items") else {
@@ -36,10 +35,10 @@ pub fn list_tasks(slug: &str, include_done: bool) -> Result<Vec<Value>> {
     })
 }
 
-/// Port of `items.add_task`. Python's defaults: agent None, notes "", status "todo".
+/// Add a task. Usually called with agent `None`, notes "" and status "todo".
 pub fn add_task(slug: &str, title: &str, agent: Option<&str>, notes: &str, status: &str) -> Result<Value> {
     if !TASK_STATES.contains(&status) {
-        return am_err(format!("unknown task status {}; use {}", repr(status), TASK_STATES.join(", ")));
+        return am_err(format!("unknown task status {}; use {}", quote(status), TASK_STATES.join(", ")));
     }
     let mut created = Value::Null;
     update_json(&tasks_path(slug), tasks_default(), |data| {
@@ -65,13 +64,12 @@ pub fn add_task(slug: &str, title: &str, agent: Option<&str>, notes: &str, statu
     Ok(created)
 }
 
-/// Port of `items.update_task(slug, task_id, **fields)`: `fields` is a dict; null values
-/// are left alone, as Python skips `None`.
+/// Update a task: `fields` is an object of changes; null values are left alone.
 pub fn update_task(slug: &str, task_id: i64, fields: &Value) -> Result<Value> {
-    if let Some(status) = get(fields, "status").filter(|s| am_core::py::truthy(Some(s))) {
-        let status = am_core::py::str_value(status);
+    if let Some(status) = get(fields, "status").filter(|s| am_core::format::truthy(Some(s))) {
+        let status = am_core::format::text(status);
         if !TASK_STATES.contains(&status.as_str()) {
-            return am_err(format!("unknown task status {}; use {}", repr(&status), TASK_STATES.join(", ")));
+            return am_err(format!("unknown task status {}; use {}", quote(&status), TASK_STATES.join(", ")));
         }
     }
     let mut found: Option<Value> = None;
@@ -95,8 +93,8 @@ pub fn update_task(slug: &str, task_id: i64, fields: &Value) -> Result<Value> {
         }
         None
     })?;
-    let Some(found) = found.filter(|f| am_core::py::truthy(Some(f))) else {
-        return am_err(format!("no task {task_id} in project {}", repr(slug)));
+    let Some(found) = found.filter(|f| am_core::format::truthy(Some(f))) else {
+        return am_err(format!("no task {task_id} in project {}", quote(slug)));
     };
     poke(slug);
     Ok(found)
@@ -106,26 +104,26 @@ pub fn update_task(slug: &str, task_id: i64, fields: &Value) -> Result<Value> {
 
 pub const ATTENTION_KINDS: [&str; 3] = ["action", "alert", "result"];
 
-/// The keyword arguments of `items.add_attention`, with Python's defaults.
+/// The options of [`add_attention`], with their defaults.
 #[derive(Clone, Debug, Default)]
 pub struct AttentionOpts {
-    /// `body=""`
+    /// Empty by default.
     pub body: String,
-    /// `kind="action"` when `None`.
+    /// "action" when `None`.
     pub kind: Option<String>,
     pub run: Option<String>,
     pub r#ref: Option<String>,
-    /// `source=""`
+    /// Empty by default.
     pub source: String,
     pub key: Option<String>,
 }
 
-/// Port of `items.add_attention`: add an item for the user. With `key`, an open item with
-/// that key is reused so repeated checks don't pile up.
+/// Add an item for the user. With `key`, an open item with that key is reused so
+/// repeated checks don't pile up.
 pub fn add_attention(slug: &str, title: &str, opts: AttentionOpts) -> Result<Value> {
     let kind = opts.kind.as_deref().unwrap_or("action");
     if !ATTENTION_KINDS.contains(&kind) {
-        return am_err(format!("unknown attention kind {}; use {}", repr(kind), ATTENTION_KINDS.join(", ")));
+        return am_err(format!("unknown attention kind {}; use {}", quote(kind), ATTENTION_KINDS.join(", ")));
     }
     if let Some(key) = opts.key.as_deref().filter(|k| !k.is_empty()) {
         for item in list_attention(slug, false)? {
@@ -152,12 +150,11 @@ pub fn add_attention(slug: &str, title: &str, opts: AttentionOpts) -> Result<Val
     Ok(item)
 }
 
-/// Port of `items.list_attention`.
 pub fn list_attention(slug: &str, include_resolved: bool) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     for item_id in list_json_ids(&attention_dir(slug))? {
         if let Some(item) = read_json(&attention_dir(slug).join(format!("{item_id}.json")))? {
-            if am_core::py::truthy(Some(&item))
+            if am_core::format::truthy(Some(&item))
                 && (include_resolved || get(&item, "state").and_then(Value::as_str) != Some("resolved"))
             {
                 out.push(item);
@@ -167,16 +164,15 @@ pub fn list_attention(slug: &str, include_resolved: bool) -> Result<Vec<Value>> 
     Ok(out)
 }
 
-/// Port of `items.get_attention`.
 pub fn get_attention(slug: &str, item_id: &str) -> Result<Value> {
     check_item_id(item_id)?;
     match read_json(&attention_dir(slug).join(format!("{item_id}.json")))? {
         Some(item) => Ok(item),
-        None => am_err(format!("no attention item {item_id} in project {}", repr(slug))),
+        None => am_err(format!("no attention item {item_id} in project {}", quote(slug))),
     }
 }
 
-/// `items._update_attention(slug, item_id, **fields)`.
+/// Merge `fields` (an object) into an attention item.
 fn update_attention(slug: &str, item_id: &str, fields: Value) -> Result<Value> {
     get_attention(slug, item_id)?;
     let result = update_json(&attention_dir(slug).join(format!("{item_id}.json")), Value::Null, |d| {
@@ -187,7 +183,6 @@ fn update_attention(slug: &str, item_id: &str, fields: Value) -> Result<Value> {
     Ok(result)
 }
 
-/// Port of `items.mark_attention_seen`.
 pub fn mark_attention_seen(slug: &str, item_id: &str) -> Result<Value> {
     let item = get_attention(slug, item_id)?;
     if get(&item, "state").and_then(Value::as_str) != Some("new") {
@@ -196,12 +191,10 @@ pub fn mark_attention_seen(slug: &str, item_id: &str) -> Result<Value> {
     update_attention(slug, item_id, json!({"state": "seen", "seen_at": now_value()}))
 }
 
-/// Port of `items.resolve_attention`.
 pub fn resolve_attention(slug: &str, item_id: &str, by: &str) -> Result<Value> {
     update_attention(slug, item_id, json!({"state": "resolved", "resolved_at": now_value(), "resolved_by": by}))
 }
 
-/// Port of `items.resolve_attention_key`.
 pub fn resolve_attention_key(slug: &str, key: &str, by: &str) -> Result<()> {
     for item in list_attention(slug, false)? {
         if get(&item, "key").and_then(Value::as_str) == Some(key) {
@@ -211,8 +204,8 @@ pub fn resolve_attention_key(slug: &str, key: &str, by: &str) -> Result<()> {
     Ok(())
 }
 
-/// Port of `items.attention_counts`: `2 need you` while everything is new, `1 new · 2 open`
-/// while part is, and `2 open` once all of it has been looked at.
+/// Counts and a label: `2 need you` while everything is new, `1 new · 2 open` while part
+/// is, and `2 open` once all of it has been looked at.
 pub fn attention_counts(items: &[Value]) -> Value {
     let total = items.len();
     let new = items.iter().filter(|i| get(i, "state").and_then(Value::as_str) == Some("new")).count();
@@ -234,12 +227,12 @@ fn schedules_path(slug: &str) -> PathBuf {
     project_dir(slug).join("schedules.json")
 }
 
-/// Port of `items.list_schedules`: a dict of name to entry, in file order.
+/// The schedules: an object of name to entry, in file order.
 pub fn list_schedules(slug: &str) -> Result<Value> {
     Ok(read_json(&schedules_path(slug))?.unwrap_or_else(util::empty))
 }
 
-/// The keyword arguments of `items.set_schedule`.
+/// The options of [`set_schedule`].
 #[derive(Clone, Debug, Default)]
 pub struct ScheduleOpts {
     pub every: Option<String>,
@@ -249,7 +242,6 @@ pub struct ScheduleOpts {
     pub enabled: Option<bool>,
 }
 
-/// Port of `items.set_schedule`.
 pub fn set_schedule(slug: &str, name: &str, opts: ScheduleOpts) -> Result<Value> {
     let every = opts.every.as_deref().filter(|e| !e.is_empty());
     let cron = opts.cron.as_deref().filter(|c| !c.is_empty());
@@ -266,7 +258,7 @@ pub fn set_schedule(slug: &str, name: &str, opts: ScheduleOpts) -> Result<Value>
     }
     let mut result = Value::Null;
     util::try_update_json(&schedules_path(slug), util::empty(), |data| {
-        let existing = get(data, name).filter(|e| am_core::py::truthy(Some(e))).cloned();
+        let existing = get(data, name).filter(|e| am_core::format::truthy(Some(e))).cloned();
         let mut entry =
             existing.unwrap_or_else(|| json!({"name": name, "to": "manager", "enabled": true, "created": now_value()}));
         let f = util::fields(&mut entry);
@@ -299,13 +291,12 @@ pub fn set_schedule(slug: &str, name: &str, opts: ScheduleOpts) -> Result<Value>
     })?;
     let to = util::s(&result, "to");
     if !projects::agent_exists(slug, &to) {
-        return am_err(format!("schedule saved, but agent {} doesn't exist in {} yet", repr(&to), repr(slug)));
+        return am_err(format!("schedule saved, but agent {} doesn't exist in {} yet", quote(&to), quote(slug)));
     }
     poke(slug);
     Ok(result)
 }
 
-/// Port of `items.remove_schedule`.
 pub fn remove_schedule(slug: &str, name: &str) -> Result<()> {
     let mut found = false;
     update_json(&schedules_path(slug), util::empty(), |data| {
@@ -315,7 +306,7 @@ pub fn remove_schedule(slug: &str, name: &str) -> Result<()> {
         None
     })?;
     if !found {
-        return am_err(format!("no schedule {} in project {}", repr(name), repr(slug)));
+        return am_err(format!("no schedule {} in project {}", quote(name), quote(slug)));
     }
     poke(slug);
     Ok(())
@@ -339,21 +330,22 @@ const CRON_NAMES: [(&str, i64); 19] = [
 ];
 const CRON_RANGES: [(i64, i64); 5] = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)];
 
-/// `items._cron_value`.
+/// A number, or a month or weekday name.
 fn cron_value(text: &str) -> Option<i64> {
     let lower = text.to_lowercase();
     match CRON_NAMES.iter().find(|(n, _)| *n == lower) {
         Some((_, v)) => Some(*v),
-        None => am_core::py::parse_int(text),
+        None => am_core::format::parse_int(text),
     }
 }
 
-/// `items._cron_field`: `None` where Python raises ValueError or KeyError.
+/// One cron field's values: `None` for a bad number or name, a step below 1, or a range
+/// out of bounds or backwards.
 fn cron_field(text: &str, low: i64, high: i64) -> Option<BTreeSet<u32>> {
     let mut values = BTreeSet::new();
     for part in text.split(',') {
         let (body, step_text) = part.split_once('/').unwrap_or((part, ""));
-        let step = if step_text.is_empty() { 1 } else { am_core::py::parse_int(step_text)? };
+        let step = if step_text.is_empty() { 1 } else { am_core::format::parse_int(step_text)? };
         if step < 1 {
             return None;
         }
@@ -377,22 +369,22 @@ fn cron_field(text: &str, low: i64, high: i64) -> Option<BTreeSet<u32>> {
     Some(values)
 }
 
-/// `expression.split()`.
+/// The fields of an expression, split on whitespace.
 fn split_fields(expression: &str) -> Vec<&str> {
-    expression.split(am_core::py::is_space).filter(|f| !f.is_empty()).collect()
+    expression.split(am_core::format::is_space).filter(|f| !f.is_empty()).collect()
 }
 
-/// Port of `items.parse_cron`: standard five-field cron, minute hour day month weekday.
+/// Parse a standard five-field cron: minute hour day month weekday.
 pub fn parse_cron(expression: &str) -> Result<Cron> {
     let fields = split_fields(expression);
     if fields.len() != 5 {
-        return am_err(format!("cron {} needs five fields: minute hour day month weekday", repr(expression)));
+        return am_err(format!("cron {} needs five fields: minute hour day month weekday", quote(expression)));
     }
     let mut parsed = Vec::new();
     for (f, (lo, hi)) in fields.iter().zip(CRON_RANGES) {
         match cron_field(f, lo, hi) {
             Some(set) => parsed.push(set),
-            None => return am_err(format!("cannot parse cron {}", repr(expression))),
+            None => return am_err(format!("cannot parse cron {}", quote(expression))),
         }
     }
     let weekday = parsed[4].iter().map(|d| if *d == 7 { 0 } else { *d }).collect();
@@ -405,7 +397,7 @@ pub fn parse_cron(expression: &str) -> Result<Cron> {
     })
 }
 
-/// Port of `items.cron_matches`, for a naive local datetime (see `localtime`).
+/// Whether a cron matches a moment, in naive local seconds (see `localtime`).
 pub fn cron_matches(parsed: &Cron, moment: i64, day_restricted: bool, weekday_restricted: bool) -> bool {
     let f = localtime::fields(moment);
     if !parsed.minute.contains(&f.minute) || !parsed.hour.contains(&f.hour) || !parsed.month.contains(&f.month) {
@@ -420,7 +412,7 @@ pub fn cron_matches(parsed: &Cron, moment: i64, day_restricted: bool, weekday_re
     day_ok && weekday_ok
 }
 
-/// Port of `items.next_cron_fire`: the first matching local minute after `after`.
+/// The first matching local minute after `after`.
 pub fn next_cron_fire(expression: &str, after: f64) -> Result<f64> {
     let parsed = parse_cron(expression)?;
     let fields = split_fields(expression);
@@ -433,10 +425,9 @@ pub fn next_cron_fire(expression: &str, after: f64) -> Result<f64> {
         }
         moment += 60;
     }
-    am_err(format!("cron {} never fires", repr(expression)))
+    am_err(format!("cron {} never fires", quote(expression)))
 }
 
-/// Port of `items.next_fire`.
 pub fn next_fire(entry: &Value, last: f64) -> Result<f64> {
     if has(entry, "cron") {
         return next_cron_fire(&util::s(entry, "cron"), last);
@@ -445,7 +436,6 @@ pub fn next_fire(entry: &Value, last: f64) -> Result<f64> {
     Ok(last + am_core::clock::parse_duration_value(&every)?)
 }
 
-/// Port of `items.project_paths_exist`.
 pub fn project_paths_exist(slug: &str) -> bool {
     project_dir(slug).is_dir()
 }
@@ -455,7 +445,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cron_parses_as_python_does() {
+    fn cron_parses_fields() {
         let c = parse_cron("*/15 9-17 * jan-mar mon-fri").unwrap();
         assert_eq!(c.minute.iter().copied().collect::<Vec<_>>(), vec![0, 15, 30, 45]);
         assert_eq!(c.hour.len(), 9);

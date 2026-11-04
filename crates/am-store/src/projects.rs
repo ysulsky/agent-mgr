@@ -1,6 +1,6 @@
 //! Projects and agents: plain JSON files under projects/<slug>/.
 
-use crate::util::{self, get, has, now_value, repr};
+use crate::util::{self, get, has, now_value, quote};
 use am_core::{
     active_dir, agent_dir, agents_dir, am_err, inbox_dir, list_json_ids, paths, poke, project_dir, projects_dir, read_json,
     turn_dir, update_json, write_json, Result, Value, HOME_SLUG, MANAGER,
@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 pub const PROJECT_SUBDIRS: [&str; 7] = ["workspace", "results", "cache", "artifacts", "attachments", "attention", "agents"];
 pub const BACKENDS: [&str; 2] = ["claude", "codex"];
 
-/// Port of `projects.list_slugs`.
 pub fn list_slugs() -> Result<Vec<String>> {
     let root = projects_dir();
     let mut slugs: Vec<String> = am_core::fsx::listdir(&root)?
@@ -22,23 +21,21 @@ pub fn list_slugs() -> Result<Vec<String>> {
     Ok(slugs)
 }
 
-/// Port of `projects.exists`.
 pub fn exists(slug: &str) -> bool {
     util::exists(&project_dir(slug).join("project.json"))
 }
 
-/// Port of `projects.get_project`.
 pub fn get_project(slug: &str) -> Result<Value> {
     match read_json(&project_dir(slug).join("project.json"))? {
         Some(data) if !data.is_null() => Ok(data),
-        _ => am_err(format!("no project {}; see `am project list`", repr(slug))),
+        _ => am_err(format!("no project {}; see `am project list`", quote(slug))),
     }
 }
 
 const PROJECT_SETTINGS: [&str; 8] =
     ["name", "description", "status", "health_every", "manager_backend", "manager_model", "worker_backend", "worker_model"];
 
-/// Port of `projects.update_project(slug, **fields)`: `fields` is a dict of settings.
+/// Update a project: `fields` is an object of settings.
 pub fn update_project(slug: &str, fields: &Value) -> Result<Value> {
     get_project(slug)?;
     let empty = serde_json::Map::new();
@@ -61,32 +58,30 @@ pub fn update_project(slug: &str, fields: &Value) -> Result<Value> {
     Ok(result)
 }
 
-/// Port of `projects.check_backend`.
 pub fn check_backend(backend: &str) -> Result<()> {
     if !BACKENDS.contains(&backend) {
-        return am_err(format!("unknown backend {}; use {}", repr(backend), BACKENDS.join(" or ")));
+        return am_err(format!("unknown backend {}; use {}", quote(backend), BACKENDS.join(" or ")));
     }
     Ok(())
 }
 
-/// Port of `projects.create_project`.
 pub fn create_project(name: &str, description: &str, slug: Option<&str>) -> Result<Value> {
     let slug = match slug.filter(|s| !s.is_empty()) {
         Some(s) => s.to_string(),
         None => am_core::slugify(name)?,
     };
     if !am_core::ids::slug_re().is_match(&slug) {
-        return am_err(format!("invalid project slug {}", repr(&slug)));
+        return am_err(format!("invalid project slug {}", quote(&slug)));
     }
     let root = project_dir(&slug);
     if util::exists(&root.join("project.json")) {
         if is_archived(&slug)? {
             return am_err(format!(
                 "project {} already exists, and is archived; `am project unarchive {slug}` brings it back",
-                repr(&slug)
+                quote(&slug)
             ));
         }
-        return am_err(format!("project {} already exists", repr(&slug)));
+        return am_err(format!("project {} already exists", quote(&slug)));
     }
     for sub in PROJECT_SUBDIRS {
         std::fs::create_dir_all(root.join(sub))?;
@@ -115,7 +110,7 @@ pub fn create_project(name: &str, description: &str, slug: Option<&str>) -> Resu
     Ok(project)
 }
 
-/// `Path.touch()`: create if missing, else update the times.
+/// Create a file if missing, else update its times.
 pub fn touch(path: &Path) -> Result<()> {
     let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|e| am_core::Error::Other(e.to_string()))?;
     if unsafe { libc::utimes(c.as_ptr(), std::ptr::null()) } != 0 {
@@ -127,13 +122,12 @@ pub fn touch(path: &Path) -> Result<()> {
 
 // ---------------------------------------------------------------- archiving
 
-/// Port of `projects.is_archived`.
 pub fn is_archived(slug: &str) -> Result<bool> {
     Ok(has(&get_project(slug)?, "archived_at"))
 }
 
-/// Port of `projects.archive_project`: pause a project. This only sets a flag, which the
-/// runner and scheduler read. Repeating it is harmless, and keeps the original time.
+/// Pause a project. This only sets a flag, which the runner and scheduler read.
+/// Repeating it is harmless, and keeps the original time.
 pub fn archive_project(slug: &str) -> Result<Value> {
     if slug == HOME_SLUG {
         return am_err("the home project can't be archived");
@@ -149,8 +143,8 @@ pub fn archive_project(slug: &str) -> Result<Value> {
     Ok(result)
 }
 
-/// Port of `projects.unarchive_project`: resume a project. Only a real un-archive sets
-/// `unarchived_at`, which the scheduler counts from.
+/// Resume a project. Only a real un-archive sets `unarchived_at`, which the scheduler
+/// counts from.
 pub fn unarchive_project(slug: &str) -> Result<Value> {
     get_project(slug)?;
     let result = update_json(&project_dir(slug).join("project.json"), Value::Null, |p| {
@@ -167,7 +161,6 @@ pub fn unarchive_project(slug: &str) -> Result<Value> {
 
 // ---------------------------------------------------------------- agents
 
-/// Port of `projects.agent_names`.
 pub fn agent_names(slug: &str) -> Result<Vec<String>> {
     let dir = agents_dir(slug);
     let mut names: Vec<String> =
@@ -176,19 +169,18 @@ pub fn agent_names(slug: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Port of `projects.get_agent`.
 pub fn get_agent(slug: &str, name: &str) -> Result<Value> {
     match read_json(&agent_dir(slug, name).join("agent.json"))? {
         Some(data) if !data.is_null() => Ok(data),
         _ => {
             refuse_if_offloaded(slug)?;
-            am_err(format!("no agent {} in project {}; see `am agent list`", repr(name), repr(slug)))
+            am_err(format!("no agent {} in project {}; see `am agent list`", quote(name), quote(slug)))
         }
     }
 }
 
-/// `projects._refuse_if_offloaded`: an offloaded project is only a stub, and anything
-/// written into it would be replaced on restore.
+/// Refuse to touch an offloaded project: it's only a stub, and anything written into it
+/// would be replaced on restore.
 pub fn refuse_if_offloaded(slug: &str) -> Result<()> {
     let project = read_json(&project_dir(slug).join("project.json"))?.unwrap_or(Value::Null);
     if has(&project, "offloaded") {
@@ -197,12 +189,11 @@ pub fn refuse_if_offloaded(slug: &str) -> Result<()> {
     Ok(())
 }
 
-/// Port of `projects.agent_exists`.
 pub fn agent_exists(slug: &str, name: &str) -> bool {
     util::exists(&agent_dir(slug, name).join("agent.json"))
 }
 
-/// Port of `projects.update_agent`: apply `change` to `agent.json` under its lock.
+/// Apply `change` to `agent.json` under its lock.
 pub fn update_agent(slug: &str, name: &str, change: impl FnOnce(&mut Value)) -> Result<Value> {
     let result = update_json(&agent_dir(slug, name).join("agent.json"), Value::Null, |a| {
         change(a);
@@ -212,7 +203,7 @@ pub fn update_agent(slug: &str, name: &str, change: impl FnOnce(&mut Value)) -> 
     Ok(result)
 }
 
-/// Port of `projects.create_agent`. Python's defaults: role "worker", purpose "".
+/// Create an agent. Usually called with role "worker" and purpose "".
 pub fn create_agent(
     slug: &str,
     name: &str,
@@ -222,7 +213,7 @@ pub fn create_agent(
     purpose: &str,
 ) -> Result<Value> {
     if !am_core::ids::agent_name_re().is_match(name) {
-        return am_err(format!("invalid agent name {}: use lowercase letters, digits, - and _", repr(name)));
+        return am_err(format!("invalid agent name {}: use lowercase letters, digits, - and _", quote(name)));
     }
     if name == MANAGER && role != "manager" {
         return am_err("the name 'manager' is reserved for the project's manager");
@@ -233,7 +224,7 @@ pub fn create_agent(
     refuse_if_offloaded(slug)?;
     let root = agent_dir(slug, name);
     if util::exists(&root.join("agent.json")) {
-        return am_err(format!("agent {} already exists in project {}", repr(name), repr(slug)));
+        return am_err(format!("agent {} already exists in project {}", quote(name), quote(slug)));
     }
     for sub in ["inbox", "delivered", "answers", "turns", "active", "notes"] {
         std::fs::create_dir_all(root.join(sub))?;
@@ -261,7 +252,7 @@ pub fn create_agent(
     Ok(agent)
 }
 
-/// Port of `projects.set_agent_backend`. `None` leaves a field alone and an empty string
+/// Set an agent's backend and model. `None` leaves a field alone and an empty string
 /// returns it to the project default.
 pub fn set_agent_backend(slug: &str, name: &str, backend: Option<&str>, model: Option<&str>) -> Result<Value> {
     if let Some(b) = backend.filter(|b| !b.is_empty()) {
@@ -278,7 +269,6 @@ pub fn set_agent_backend(slug: &str, name: &str, backend: Option<&str>, model: O
     })
 }
 
-/// Port of `projects.retire_agent`.
 pub fn retire_agent(slug: &str, name: &str) -> Result<Value> {
     if name == MANAGER {
         return am_err("a project's manager cannot be retired");
@@ -290,9 +280,9 @@ pub fn retire_agent(slug: &str, name: &str) -> Result<Value> {
     })
 }
 
-/// Port of `projects.effective_backend`: (backend, model), from the agent's own setting,
-/// then the project's, then config. A default model only applies on the backend it was
-/// set for. An empty model means the CLI's own default.
+/// An agent's (backend, model), from its own setting, then the project's, then config.
+/// A default model only applies on the backend it was set for. An empty model means the
+/// CLI's own default.
 pub fn effective_backend(slug: &str, agent: &Value, cfg: Option<&Value>) -> Result<(String, String)> {
     let project = get_project(slug)?;
     effective_backend_in(&project, agent, cfg)
@@ -301,7 +291,7 @@ pub fn effective_backend(slug: &str, agent: &Value, cfg: Option<&Value>) -> Resu
 /// `effective_backend` with the project already read.
 pub fn effective_backend_in(project: &Value, agent: &Value, cfg: Option<&Value>) -> Result<(String, String)> {
     let loaded;
-    let cfg = match cfg.filter(|c| am_core::py::truthy(Some(c))) {
+    let cfg = match cfg.filter(|c| am_core::format::truthy(Some(c))) {
         Some(c) => c,
         None => {
             loaded = am_core::config::load()?;
@@ -314,7 +304,7 @@ pub fn effective_backend_in(project: &Value, agent: &Value, cfg: Option<&Value>)
     let config_model = util::or(&defaults, &format!("{prefix}_model"), &Value::String(String::new())).clone();
     let project_backend = get(project, &format!("{prefix}_backend")).cloned().unwrap_or(Value::Null);
     let project_model = get(project, &format!("{prefix}_model")).cloned().unwrap_or(Value::Null);
-    let t = |v: &Value| am_core::py::truthy(Some(v));
+    let t = |v: &Value| am_core::format::truthy(Some(v));
     let backend = if has(agent, "backend") {
         agent["backend"].clone()
     } else if t(&project_backend) {
@@ -331,11 +321,10 @@ pub fn effective_backend_in(project: &Value, agent: &Value, cfg: Option<&Value>)
     } else {
         Value::String(String::new())
     };
-    Ok((am_core::py::str_value(&backend), am_core::py::str_value(&model)))
+    Ok((am_core::format::text(&backend), am_core::format::text(&model)))
 }
 
-/// Port of `projects.active_turns`: turns of this agent that are not finished, each from
-/// its `meta.json`.
+/// Turns of this agent that are not finished, each from its `meta.json`.
 pub fn active_turns(slug: &str, name: &str) -> Result<Vec<Value>> {
     let mut names = am_core::fsx::listdir(&active_dir(slug, name))?;
     names.sort();
@@ -345,7 +334,7 @@ pub fn active_turns(slug: &str, name: &str) -> Result<Vec<Value>> {
             continue;
         }
         if let Some(meta) = read_json(&turn_dir(slug, name, &tid).join("meta.json"))? {
-            if am_core::py::truthy(Some(&meta)) {
+            if am_core::format::truthy(Some(&meta)) {
                 out.push(meta);
             }
         }
@@ -353,10 +342,9 @@ pub fn active_turns(slug: &str, name: &str) -> Result<Vec<Value>> {
     Ok(out)
 }
 
-/// Port of `projects.agent_status`.
 pub fn agent_status(slug: &str, name: &str, agent: Option<&Value>, cfg: Option<&Value>) -> Result<Value> {
     let owned;
-    let agent = match agent.filter(|a| am_core::py::truthy(Some(a))) {
+    let agent = match agent.filter(|a| am_core::format::truthy(Some(a))) {
         Some(a) => a,
         None => {
             owned = get_agent(slug, name)?;
@@ -418,7 +406,7 @@ pub fn agent_status(slug: &str, name: &str, agent: Option<&Value>, cfg: Option<&
     }))
 }
 
-/// Port of `projects.project_cost`: `sum(...)`, which starts from the int 0.
+/// Every agent's `cost_usd` added up, from 0.
 pub fn project_cost(slug: &str) -> Result<f64> {
     let mut total = 0.0;
     for name in agent_names(slug)? {
@@ -427,8 +415,8 @@ pub fn project_cost(slug: &str) -> Result<f64> {
     Ok(total)
 }
 
-/// `Path.resolve()` (strict=False): the real path of the longest existing prefix, with
-/// the rest appended.
+/// An absolute path with symlinks resolved, whether or not it exists: the real path of
+/// the longest existing prefix, with the rest appended.
 pub fn resolve(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -460,7 +448,7 @@ pub fn resolve(path: &Path) -> PathBuf {
     }
 }
 
-/// Port of `projects.project_for_path`: the project a path is inside of, if any.
+/// The project a path is inside of, if any.
 pub fn project_for_path(path: &Path) -> Result<Option<String>> {
     let resolved = resolve(path);
     let root = resolve(&projects_dir());
@@ -474,7 +462,7 @@ pub fn project_for_path(path: &Path) -> Result<Option<String>> {
     }
 }
 
-/// Port of `projects.current_project`: $AM_PROJECT, else the current directory.
+/// The current project: $AM_PROJECT, else the current directory's.
 pub fn current_project() -> Result<Option<String>> {
     if let Some(env) = std::env::var("AM_PROJECT").ok().filter(|s| !s.is_empty()) {
         return Ok(Some(env));
@@ -485,7 +473,6 @@ pub fn current_project() -> Result<Option<String>> {
     }
 }
 
-/// Port of `projects.require_current_project`.
 pub fn require_current_project(explicit: Option<&str>) -> Result<String> {
     let slug = match explicit.filter(|s| !s.is_empty()) {
         Some(s) => s.to_string(),
@@ -495,13 +482,12 @@ pub fn require_current_project(explicit: Option<&str>) -> Result<String> {
         },
     };
     if !exists(&slug) {
-        return am_err(format!("no project {}; see `am project list`", repr(&slug)));
+        return am_err(format!("no project {}; see `am project list`", quote(&slug)));
     }
     Ok(slug)
 }
 
-/// Port of `projects.parse_address`: `worker`, `project/worker`, or `project` (its
-/// manager) to (slug, agent).
+/// Resolve `worker`, `project/worker`, or `project` (its manager) to (slug, agent).
 pub fn parse_address(address: &str, default_project: Option<&str>) -> Result<(String, String)> {
     let default_project = default_project.filter(|d| !d.is_empty());
     if let Some((slug, name)) = address.split_once('/') {
@@ -519,12 +505,12 @@ pub fn parse_address(address: &str, default_project: Option<&str>) -> Result<(St
         return Ok((default_project.unwrap_or(HOME_SLUG).into(), MANAGER.into()));
     }
     match default_project {
-        Some(d) => am_err(format!("no agent {} in project {} and no project with that name", repr(address), repr(d))),
-        None => am_err(format!("no project {}; address an agent as project/agent", repr(address))),
+        Some(d) => am_err(format!("no agent {} in project {} and no project with that name", quote(address), quote(d))),
+        None => am_err(format!("no project {}; address an agent as project/agent", quote(address))),
     }
 }
 
-/// Port of `projects.remove_tree`: `shutil.rmtree(path, ignore_errors=True)`.
+/// Remove a directory tree, ignoring errors.
 pub fn remove_tree(path: &Path) {
     let _ = std::fs::remove_dir_all(path);
 }

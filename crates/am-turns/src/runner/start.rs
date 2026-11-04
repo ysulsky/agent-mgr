@@ -1,9 +1,8 @@
-//! Starting turns, and handing them to long-lived processes (`runner.py`, "starting
-//! turns" and "long-lived processes").
+//! Starting turns, and handing them to long-lived processes.
 
 use super::{as_str, Runner, HOLD_AFTER_AUTH_FAILURE, LOG, MAX_SIDE_TURNS};
 use crate::backends::{self, TurnSpec};
-use crate::{log, procs, prompts, pyv, store};
+use crate::{log, procs, prompts, convert, store};
 use am_core::{active_dir, am_home, new_id, now, project_dir, turn_dir, write_json, Result, Value};
 use serde_json::json;
 use std::fs;
@@ -22,9 +21,9 @@ impl Runner {
         if !backends::available(&backend, &self.cfg) {
             return self.hold_for_missing_backend(slug, name, &backend);
         }
-        let record = agent.get("session").filter(|r| am_core::py::truthy(Some(r))).cloned();
+        let record = agent.get("session").filter(|r| am_core::format::truthy(Some(r))).cloned();
         let mut session: Option<String> = match &record {
-            Some(r) if r.get("backend").and_then(Value::as_str) == Some(backend.as_str()) => r.get("id").map(pyv::str_of),
+            Some(r) if r.get("backend").and_then(Value::as_str) == Some(backend.as_str()) => r.get("id").map(convert::text),
             _ => None,
         };
         // A record from before models were recorded is taken to be on the current model.
@@ -34,22 +33,22 @@ impl Runner {
             session = None;
         }
         let mut notes: Vec<String> = match agent.get("notes") {
-            Some(Value::Array(a)) => a.iter().map(pyv::str_of).collect(),
+            Some(Value::Array(a)) => a.iter().map(convert::text).collect(),
             _ => vec![],
         };
         let mut history = String::new();
         if let (Some(r), None) = (&record, &session) {
             if model_changed {
-                let old = pyv::or_str(r.get("model"));
+                let old = convert::or_str(r.get("model"));
                 let old = if old.is_empty() { "default".to_string() } else { old };
                 let new = if model.is_empty() { "default" } else { model.as_str() };
                 notes.push(prompts::render_kv("notes/model-changed", &[("old", &old), ("new", new)])?);
             } else {
-                let old = r.get("backend").map_or_else(|| "None".to_string(), pyv::str_of);
+                let old = r.get("backend").map_or_else(|| "None".to_string(), convert::text);
                 notes.push(prompts::render_kv("notes/backend-changed", &[("old", &old), ("new", &backend)])?);
             }
             history = self.history(slug, name)?;
-        } else if am_core::py::truthy(agent.get("needs_history")) {
+        } else if am_core::format::truthy(agent.get("needs_history")) {
             history = self.history(slug, name)?;
         }
         let project = store::get_project(slug)?;
@@ -112,13 +111,13 @@ impl Runner {
     ) -> Result<()> {
         let eligible: Vec<&Value> = pending
             .iter()
-            .filter(|m| am_store::mail::SIDE_TURN_KINDS.contains(&as_str(m, "kind")) && !am_core::py::truthy(m.get("no_side")))
+            .filter(|m| am_store::mail::SIDE_TURN_KINDS.contains(&as_str(m, "kind")) && !am_core::format::truthy(m.get("no_side")))
             .collect();
         if eligible.is_empty() {
             return Ok(());
         }
         // The fork needs the main turn's session to exist on disk.
-        let Some(record) = agent.get("session").filter(|r| am_core::py::truthy(Some(r))) else { return Ok(()) };
+        let Some(record) = agent.get("session").filter(|r| am_core::format::truthy(Some(r))) else { return Ok(()) };
         if record.get("backend") != main.get("backend") {
             return Ok(());
         }
@@ -129,7 +128,7 @@ impl Runner {
         let mut sides = running.iter().filter(|t| as_str(t, "kind") == "side").count();
         let project = store::get_project(slug)?;
         let system = prompts::system_prompt(&project, agent, true)?;
-        let session = record.get("id").map(pyv::str_of);
+        let session = record.get("id").map(convert::text);
         for message in eligible {
             if sides >= MAX_SIDE_TURNS {
                 return Ok(());
@@ -196,8 +195,8 @@ impl Runner {
             .messages
             .iter()
             .flat_map(|m| m.get("attachments").and_then(Value::as_array).cloned().unwrap_or_default())
-            .filter(|a| pyv::str_of(a.get("mime").unwrap_or(&json!(""))).starts_with("image/"))
-            .map(|a| project_dir(slug).join(pyv::str_of(&a["path"])).to_string_lossy().into_owned())
+            .filter(|a| convert::text(a.get("mime").unwrap_or(&json!(""))).starts_with("image/"))
+            .map(|a| project_dir(slug).join(convert::text(&a["path"])).to_string_lossy().into_owned())
             .collect();
         let spec = TurnSpec {
             backend: l.backend.into(),
@@ -246,7 +245,7 @@ impl Runner {
     /// Main turns on claude go to a long-lived process. Codex has no equivalent of
     /// `--input-format stream-json` (`codex app-server` is experimental).
     fn persistent(&self, backend: &str) -> bool {
-        backend == "claude" && self.cfg["runner"].get("persistent").is_none_or(|v| am_core::py::truthy(Some(v)))
+        backend == "claude" && self.cfg["runner"].get("persistent").is_none_or(|v| am_core::format::truthy(Some(v)))
     }
 
     /// The agent's live process that can take this turn, if there is one. It must be on
@@ -329,7 +328,7 @@ impl Runner {
     /// At most `max_live_processes` live at once: the least recently used idle ones go
     /// first. A process with a turn is never stopped for this.
     pub(crate) fn enforce_process_cap(&self, agents: &[(String, String)]) -> Result<()> {
-        let cap = self.cfg["runner"].get("max_live_processes").map_or(6, |v| pyv::py_int(Some(v)));
+        let cap = self.cfg["runner"].get("max_live_processes").map_or(6, |v| convert::to_int(Some(v)));
         if cap <= 0 {
             return Ok(());
         }
@@ -359,7 +358,7 @@ impl Runner {
         for (proc, stream) in procs::strays(slug, name) {
             let done = stream.with_extension("done");
             let parsed = backends::parse_stream("claude", &stream, None, "", None);
-            let final_ = am_core::py::strip(&parsed.final_);
+            let final_ = am_core::format::strip(&parsed.final_);
             let text = if final_.is_empty() { parsed.error.clone() } else { final_.to_string() };
             if !text.is_empty() {
                 let proc_name = proc.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -375,7 +374,7 @@ impl Runner {
     }
 
     fn hold_for_missing_backend(&self, slug: &str, name: &str, backend: &str) -> Result<()> {
-        let binary = pyv::str_of(&self.cfg["backends"][backend]["bin"]);
+        let binary = convert::text(&self.cfg["backends"][backend]["bin"]);
         store::add_attention(
             slug,
             &format!("{backend} isn't installed"),
@@ -386,7 +385,7 @@ impl Runner {
             None,
         )?;
         store::update_agent(slug, name, |a| {
-            a["not_before"] = pyv::float_value(now() + HOLD_AFTER_AUTH_FAILURE);
+            a["not_before"] = convert::float_value(now() + HOLD_AFTER_AUTH_FAILURE);
         })?;
         Ok(())
     }
@@ -410,13 +409,13 @@ impl Runner {
                 Some(Value::Array(ts)) => ts
                     .iter()
                     .map(|t| {
-                        let get = |k: &str| t.get(k).map_or_else(|| "None".to_string(), pyv::str_of);
+                        let get = |k: &str| t.get(k).map_or_else(|| "None".to_string(), convert::text);
                         format!("{}: {}", get("from"), get("excerpt"))
                     })
                     .collect(),
                 _ => vec![],
             };
-            let reply = am_core::excerpt(&pyv::or_str(result.get("final")), 800);
+            let reply = am_core::excerpt(&convert::or_str(result.get("final")), 800);
             let entry = prompts::render_kv("turn/history-entry", &[("turn_id", &turn_id), ("asked", &asked.join("; ")), ("reply", &reply)])?;
             let n = entry.chars().count();
             if used + n > limit {
@@ -433,7 +432,7 @@ impl Runner {
     }
 }
 
-/// What `_launch` takes.
+/// What `launch` takes.
 pub(crate) struct Launch<'a> {
     pub kind: &'a str,
     pub messages: &'a [Value],
@@ -448,7 +447,7 @@ pub(crate) struct Launch<'a> {
     pub notes: &'a [String],
 }
 
-/// `Path.touch()`: create the file, or update its times. The parent must exist.
+/// Create the file, or update its times. The parent must exist.
 fn touch(path: &Path) -> Result<()> {
     fs::OpenOptions::new().append(true).create(true).open(path)?;
     let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap_or_default();

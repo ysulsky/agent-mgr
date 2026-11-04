@@ -1,4 +1,4 @@
-//! Terminals (`web.Pty`, `_bridge`, `_terminal`, `_run_command`): a process on a
+//! Terminals (`Pty`, `bridge`, `terminal`, `run_command`): a process on a
 //! pseudo-terminal, bridged to a websocket. The project and home terminals attach to a
 //! tmux session that outlives the page; Run, Fix and storage Connect run a command the
 //! server chooses, never one the request names.
@@ -96,7 +96,7 @@ impl Pty {
             while !rest.is_empty() {
                 let n = unsafe { libc::write(master.as_raw_fd(), rest.as_ptr() as *const libc::c_void, rest.len()) };
                 if n <= 0 {
-                    return; // contextlib.suppress(OSError)
+                    return; // A failed write is dropped.
                 }
                 rest = &rest[n as usize..];
             }
@@ -151,7 +151,7 @@ async fn bridge(socket: &mut WebSocket, pty: &Pty) -> bool {
                     let Ok(control) = serde_json::from_str::<serde_json::Value>(text.as_str()) else { continue };
                     let int = |key: &str| -> Option<i64> {
                         let v = control.get(key)?;
-                        v.as_i64().or_else(|| v.as_f64().map(|f| f.trunc() as i64)).or_else(|| v.as_str().and_then(am_core::py::parse_int))
+                        v.as_i64().or_else(|| v.as_f64().map(|f| f.trunc() as i64)).or_else(|| v.as_str().and_then(am_core::format::parse_int))
                     };
                     match control.get("type").and_then(|t| t.as_str()) {
                         Some("resize") => {
@@ -161,7 +161,7 @@ async fn bridge(socket: &mut WebSocket, pty: &Pty) -> bool {
                         }
                         Some("input") => {
                             if let Some(data) = control.get("data") {
-                                pty.write(am_core::py::str_value(data).as_bytes());
+                                pty.write(am_core::format::text(data).as_bytes());
                             }
                         }
                         _ => {}
@@ -180,7 +180,7 @@ async fn bridge(socket: &mut WebSocket, pty: &Pty) -> bool {
 }
 
 fn exit_message(code: Option<i32>) -> Message {
-    Message::Text(am_core::json::dumps_ascii(&json!({"type": "exit", "code": code})).into())
+    Message::Text(am_core::json::encode_ascii(&json!({"type": "exit", "code": code})).into())
 }
 
 fn terminal_env(slug: Option<&str>) -> am_core::Result<Vec<(String, String)>> {
@@ -203,7 +203,7 @@ fn terminal_env(slug: Option<&str>) -> am_core::Result<Vec<(String, String)>> {
 fn query_int(req: &Req, key: &str, default: i64) -> Result<i64, ()> {
     match req.query(key) {
         None => Ok(default),
-        Some(text) => am_core::py::parse_int(text).ok_or(()),
+        Some(text) => am_core::format::parse_int(text).ok_or(()),
     }
 }
 
@@ -223,7 +223,7 @@ async fn terminal(mut req: Req, slug: Option<String>) -> Handled {
     let response = ws.on_upgrade(move |mut socket| async move {
         if which("tmux").is_none() {
             let error = json!({"type": "error", "message": "tmux isn't installed. On a Mac: brew install tmux"});
-            let _ = socket.send(Message::Text(am_core::json::dumps_ascii(&error).into())).await;
+            let _ = socket.send(Message::Text(am_core::json::encode_ascii(&error).into())).await;
             let _ = socket.close().await;
             return;
         }
@@ -311,10 +311,10 @@ pub async fn handle(app: Arc<App>, route: Route, req: Req) -> Handled {
                 let slug = slug(&req)?;
                 Ok((slug.clone(), am_store::items::get_attention(&slug, req.param("item"))?))
             })?;
-            let Some(run) = item.get("run").filter(|r| am_core::py::truthy(Some(r))) else {
+            let Some(run) = item.get("run").filter(|r| am_core::format::truthy(Some(r))) else {
                 return Err(raised(400, Some("this item has no command to run")));
             };
-            let run = am_core::py::str_value(run);
+            let run = am_core::format::text(run);
             let login = deps::item_login(&item)?;
             let after: After = Box::new(move |_| {
                 daemon.request_login_check(None, &login.into_iter().collect::<Vec<_>>());
@@ -346,8 +346,8 @@ pub async fn handle(app: Arc<App>, route: Route, req: Req) -> Handled {
                 return Err(raised(404, Some(&format!("no storage provider {provider}"))));
             };
             let cfg = am_core::config::load()?;
-            if let Some(current) = cfg["storage"].get("rclone_remote").filter(|r| am_core::py::truthy(Some(r))) {
-                let current = am_core::py::str_value(current);
+            if let Some(current) = cfg["storage"].get("rclone_remote").filter(|r| am_core::format::truthy(Some(r))) {
+                let current = am_core::format::text(current);
                 return Err(raised(409, Some(&format!("storage already uses the remote {current}; reconnect it from the Health page"))));
             }
             if which("rclone").is_none() {

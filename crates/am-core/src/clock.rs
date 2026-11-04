@@ -1,20 +1,19 @@
-//! Clocks and durations (`core.now`, `core.awake_time`, `core.parse_duration`,
-//! `core.format_duration`). Both clocks honour the test hooks' offsets.
+//! Clocks and durations. Both clocks honour the test hooks' offsets.
 
 use crate::{am_err, hooks, Result};
 use regex::Regex;
 use std::sync::OnceLock;
 
-/// `time.time()`, plus the `now_offset` test hook.
+/// Seconds since the Unix epoch, plus the `now_offset` test hook.
 pub fn now() -> f64 {
     let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    // As time.time() computes it: nanoseconds as a double, divided by 1e9.
+    // Nanoseconds as a double, divided by 1e9, which settles how the last digits round.
     d.as_nanos() as f64 / 1e9 + hooks::f64_or("now_offset", 0.0)
 }
 
-/// `core.awake_time`: seconds the machine has been awake since boot (CLOCK_UPTIME_RAW on
-/// macOS, CLOCK_MONOTONIC elsewhere), so a sleeping Mac doesn't use up a turn's time
-/// limit. Plus the `awake_offset` test hook.
+/// Seconds the machine has been awake since boot (CLOCK_UPTIME_RAW on macOS,
+/// CLOCK_MONOTONIC elsewhere), so a sleeping Mac doesn't use up a turn's time limit. Plus
+/// the `awake_offset` test hook.
 pub fn awake_time() -> f64 {
     #[cfg(target_os = "macos")]
     let clock = libc::CLOCK_UPTIME_RAW;
@@ -35,7 +34,7 @@ fn duration_unit(unit: &str) -> f64 {
     }
 }
 
-/// `core.parse_duration` for text: `90`, `90s`, `30m`, `2h`, `1d`, `1h30m`. Seconds.
+/// A duration in text: `90`, `90s`, `30m`, `2h`, `1d`, `1h30m`. Seconds.
 /// (A JSON number is used as it is; see `parse_duration_value`.)
 pub fn parse_duration(text: &str) -> Result<f64> {
     static PARTS: OnceLock<Regex> = OnceLock::new();
@@ -43,9 +42,9 @@ pub fn parse_duration(text: &str) -> Result<f64> {
     let parts_re = PARTS.get_or_init(|| Regex::new(r"\d+(?:\.\d+)?\s*[a-z]*").unwrap());
     let one_re = ONE.get_or_init(|| Regex::new(r"^(\d+(?:\.\d+)?)\s*(s|sec|m|min|h|hr|d|w)?$").unwrap());
     let original = text;
-    let text = crate::py::strip(text).to_lowercase();
+    let text = crate::format::strip(text).to_lowercase();
     let parts: Vec<&str> = parts_re.find_iter(&text).map(|m| m.as_str()).collect();
-    let bad = || am_err(format!("cannot parse duration {}; try 90s, 30m, 2h or 1d", crate::py::repr_str(crate::py::strip(&original.to_lowercase())).unwrap_or_else(|_| format!("'{text}'"))));
+    let bad = || am_err(format!("cannot parse duration {}; try 90s, 30m, 2h or 1d", crate::format::try_quote(crate::format::strip(&original.to_lowercase())).unwrap_or_else(|_| format!("'{text}'"))));
     if parts.is_empty() || parts.concat().replace(' ', "") != text.replace(' ', "") {
         return bad();
     }
@@ -58,7 +57,7 @@ pub fn parse_duration(text: &str) -> Result<f64> {
     Ok(total)
 }
 
-/// `core.parse_duration` for a config value, which may be a number or a string.
+/// A duration from a config value, which may be a number or a string.
 pub fn parse_duration_value(v: &serde_json::Value) -> Result<f64> {
     match v {
         serde_json::Value::Number(n) => Ok(n.as_f64().unwrap_or(0.0)),
@@ -68,7 +67,7 @@ pub fn parse_duration_value(v: &serde_json::Value) -> Result<f64> {
     }
 }
 
-/// `core.format_duration`.
+/// Whole seconds in the largest unit that divides them: `1d`, `2h`, `30m`, `90s`, `0s`.
 pub fn format_duration(seconds: f64) -> String {
     let s = seconds.trunc() as i64;
     if s != 0 && s % 86400 == 0 {

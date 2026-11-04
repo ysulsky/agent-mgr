@@ -3,17 +3,17 @@
 //! - `am daemon __run`: the daemon process (`am_server::daemon`).
 //! - `am __turn DIR`: the one-shot turn supervisor (`am_turns::turn`).
 //! - `am __proc DIR`: the long-lived claude process supervisor (`am_turns::proc`).
-//! - `am __debug ...`: test hooks for the conformance suite (`debug.rs`).
+//! - `am __debug ...`: test hooks for end-to-end tests (`debug.rs`).
 //! - anything else: the CLI (`cli.rs`).
 
-mod argparse;
+mod args;
 mod cli;
 mod cli_ext;
 mod cli_records;
 mod debug;
 mod help;
 mod parser;
-mod textwrap;
+mod wrap;
 
 use std::ffi::OsString;
 

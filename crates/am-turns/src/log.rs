@@ -1,6 +1,5 @@
-//! Log lines as Python's `logging.basicConfig(format="%(asctime)s %(name)s %(levelname)s
-//! %(message)s")` writes them, to stderr (the daemon's log file). INFO and above, as the
-//! daemon configures it.
+//! Log lines to stderr (the daemon's log file): `YYYY-MM-DD HH:MM:SS,mmm NAME LEVEL
+//! message`, in local time. INFO and above, as the daemon configures it.
 
 use std::io::Write;
 
@@ -18,7 +17,7 @@ pub fn warning(name: &str, message: &str) {
     line(name, "WARNING", message);
 }
 
-/// `log.exception`: the message, then the error on the lines below.
+/// An ERROR line: the message, then the error on the lines below.
 pub fn exception(name: &str, message: &str, error: &dyn std::fmt::Display) {
     line(name, "ERROR", &format!("{message}\n{error}"));
 }

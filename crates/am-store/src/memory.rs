@@ -3,35 +3,34 @@
 //! One markdown file per entry in ~/agents/memory, recorded in git.
 
 use crate::gitstore::GitStore;
-use crate::util::{self, repr};
+use crate::util::{self, quote};
 use am_core::{am_err, am_home, atomic_write, memory_dir, poke, Result, Value};
 use regex::Regex;
 use serde_json::{json, Map};
 use std::sync::OnceLock;
 
-/// Port of `memory.store`.
 pub fn store() -> GitStore {
     GitStore::new(am_home().join(".memory.git"), memory_dir())
 }
 
-/// `memory._file`: the file name of an entry, refusing names that could be paths.
+/// The file name of an entry, refusing names that could be paths.
 fn file(name: &str) -> Result<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,79}\n?$").unwrap());
     let name = name.strip_suffix(".md").unwrap_or(name);
     if !re.is_match(name) || name.contains("..") {
-        return am_err(format!("invalid memory name {}: use letters, digits, spaces, - _ and .", repr(name)));
+        return am_err(format!("invalid memory name {}: use letters, digits, spaces, - _ and .", quote(name)));
     }
     Ok(format!("{name}.md"))
 }
 
-/// `Path.read_text(errors="replace")`, with universal newlines.
+/// A file's text, with invalid UTF-8 replaced and `\r\n` and `\r` read as `\n`.
 fn read_text_lossy(path: &std::path::Path) -> std::io::Result<String> {
     let bytes = std::fs::read(path)?;
     Ok(String::from_utf8_lossy(&bytes).replace("\r\n", "\n").replace('\r', "\n"))
 }
 
-/// Port of `memory.list_entries`: `{name, mtime, summary}`, by name ignoring case.
+/// Every entry as `{name, mtime, summary}`, by name ignoring case.
 pub fn list_entries() -> Result<Vec<Value>> {
     let mut out: Vec<(String, Value)> = Vec::new();
     for filename in am_core::fsx::listdir(&memory_dir())? {
@@ -44,10 +43,10 @@ pub fn list_entries() -> Result<Vec<Value>> {
             continue;
         }
         let text = read_text_lossy(&path)?;
-        let summary = am_core::py::splitlines(&text)
+        let summary = am_core::format::split_lines(&text)
             .into_iter()
-            .find(|l| !am_core::py::strip(l).is_empty())
-            .map(|l| am_core::py::strip(l.trim_matches(|c| c == '#' || c == ' ')).to_string())
+            .find(|l| !am_core::format::strip(l).is_empty())
+            .map(|l| am_core::format::strip(l.trim_matches(|c| c == '#' || c == ' ')).to_string())
             .unwrap_or_default();
         let mtime = util::mtime(&std::fs::metadata(&path)?);
         let name = filename[..filename.len() - 3].to_string();
@@ -57,10 +56,9 @@ pub fn list_entries() -> Result<Vec<Value>> {
     Ok(out.into_iter().map(|(_, v)| v).collect())
 }
 
-/// Port of `memory.read`.
 pub fn read(name: &str) -> Result<String> {
     let path = memory_dir().join(file(name)?);
-    let missing = || am_err(format!("no memory entry {}; see `am memory list`", repr(name)));
+    let missing = || am_err(format!("no memory entry {}; see `am memory list`", quote(name)));
     match std::fs::symlink_metadata(&path) {
         Ok(m) if m.file_type().is_symlink() => return missing(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return missing(),
@@ -76,28 +74,26 @@ pub fn read(name: &str) -> Result<String> {
     }
 }
 
-/// Port of `memory.add`.
 pub fn add(name: &str, text: &str, author: Option<&str>) -> Result<Option<String>> {
     let filename = file(name)?;
     if util::exists(&memory_dir().join(&filename)) {
-        return am_err(format!("memory entry {} exists; use `am memory edit`", repr(name)));
+        return am_err(format!("memory entry {} exists; use `am memory edit`", quote(name)));
     }
     let message = format!("Add {}", &filename[..filename.len() - 3]);
     write(&filename, text, &message, author)
 }
 
-/// Port of `memory.edit`.
 pub fn edit(name: &str, text: &str, author: Option<&str>) -> Result<Option<String>> {
     let filename = file(name)?;
     if !util::exists(&memory_dir().join(&filename)) {
-        return am_err(format!("no memory entry {}; use `am memory add`", repr(name)));
+        return am_err(format!("no memory entry {}; use `am memory add`", quote(name)));
     }
     let message = format!("Edit {}", &filename[..filename.len() - 3]);
     write(&filename, text, &message, author)
 }
 
 fn write(filename: &str, text: &str, message: &str, author: Option<&str>) -> Result<Option<String>> {
-    if am_core::py::strip(text).is_empty() {
+    if am_core::format::strip(text).is_empty() {
         return am_err("a memory entry cannot be empty; use `am memory rm` to delete one");
     }
     let body = if text.ends_with('\n') { text.to_string() } else { format!("{text}\n") };
@@ -107,12 +103,11 @@ fn write(filename: &str, text: &str, message: &str, author: Option<&str>) -> Res
     Ok(rev)
 }
 
-/// Port of `memory.remove`.
 pub fn remove(name: &str, author: Option<&str>) -> Result<Option<String>> {
     let filename = file(name)?;
     let path = memory_dir().join(&filename);
     if !util::exists(&path) {
-        return am_err(format!("no memory entry {}", repr(name)));
+        return am_err(format!("no memory entry {}", quote(name)));
     }
     std::fs::remove_file(&path)?;
     let message = format!("Remove {}", &filename[..filename.len() - 3]);
@@ -121,7 +116,7 @@ pub fn remove(name: &str, author: Option<&str>) -> Result<Option<String>> {
     Ok(rev)
 }
 
-/// Port of `memory.log` (Python's default limit is 100).
+/// The history of one entry, or of all of memory (callers pass a limit of 100).
 pub fn log(name: Option<&str>, limit: i64) -> Result<Vec<Value>> {
     let path = match name.filter(|n| !n.is_empty()) {
         Some(n) => Some(file(n)?),
@@ -130,21 +125,18 @@ pub fn log(name: Option<&str>, limit: i64) -> Result<Vec<Value>> {
     store().log(path.as_deref(), limit)
 }
 
-/// Port of `memory.show_at`.
 pub fn show_at(name: &str, rev: &str) -> Result<String> {
     match store().show(rev, &file(name)?)? {
         Some(data) => Ok(String::from_utf8_lossy(&data).into_owned()),
-        None => am_err(format!("no memory entry {} at revision {rev}", repr(name))),
+        None => am_err(format!("no memory entry {} at revision {rev}", quote(name))),
     }
 }
 
-/// `memory._notify`.
 fn notify() {
     poke("home");
 }
 
-/// Port of `memory.snapshot`: each entry's name and a hash of its text, to tell later what
-/// changed.
+/// Each entry's name and a hash of its text, to tell later what changed.
 pub fn snapshot() -> Result<Value> {
     use sha2::Digest;
     let mut out = Map::new();
@@ -158,7 +150,7 @@ pub fn snapshot() -> Result<Value> {
     Ok(Value::Object(out))
 }
 
-/// Port of `memory.index_text`: the list of entries, for the top of a turn's prompt.
+/// The list of entries, for the top of a turn's prompt.
 pub fn index_text() -> Result<String> {
     let entries = list_entries()?;
     Ok(entries

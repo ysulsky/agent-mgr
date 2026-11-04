@@ -1,6 +1,6 @@
 [package]
 name = "am-core"
-description = "Paths, ids, the file protocol, Python-compatible formatting, clocks and config"
+description = "Paths, ids, the file protocol, value and JSON formatting, clocks and config"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

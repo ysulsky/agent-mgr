@@ -1,12 +1,11 @@
-//! The whole-project half of `am/storage.py`: one archive per offload,
+//! Offloading and restoring whole projects: one archive per offload,
 //! `<folder>/projects/<slug>/<slug>-<time>.tar.gz`, holding
 //!   manifest.json        what's inside, and each agent's sessions
 //!   project/...          everything under projects/<slug>/
 //!   home/...             the agents' CLI session files, by their path under $HOME
 //! It's streamed to `rclone rcat`, so it needs no local space, and checked against the
 //! remote's MD5. Restore streams `rclone cat` into a staging dir, checks the SHA-256
-//! recorded in the stub, and only then moves things into place. Either implementation
-//! restores the other's archives.
+//! recorded in the stub, and only then moves things into place.
 
 use crate::storage::{
     alive, human_size, offloaded_info, project_children, project_plan, project_status, rclone, remote_label, remote_root,
@@ -22,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-/// `storage._set(slug, **fields)`.
+/// Update the project's offload.json with `fields`, and poke the project.
 fn set(slug: &str, fields: Value) -> Result<()> {
     update_json(&state_path(slug), util::empty(), |s| {
         util::update(s, &fields);
@@ -32,8 +31,7 @@ fn set(slug: &str, fields: Value) -> Result<()> {
     Ok(())
 }
 
-/// Port of `storage.begin_project_job`: claim the project for one offload or restore, or
-/// say why not.
+/// Claim the project for one offload or restore, or say why not.
 pub fn begin_project_job(slug: &str, kind: &str, unarchive: bool) -> Result<()> {
     let project = projects::get_project(slug)?;
     if kind == "offload" {
@@ -58,7 +56,7 @@ pub fn begin_project_job(slug: &str, kind: &str, unarchive: bool) -> Result<()> 
     }
     util::try_update_json(&state_path(slug), util::empty(), |state| {
         let job = get(state, "job").cloned().unwrap_or(Value::Null);
-        if am_core::py::truthy(Some(&job)) && alive(get(&job, "pid")) {
+        if am_core::format::truthy(Some(&job)) && alive(get(&job, "pid")) {
             let doing = if get(&job, "kind").and_then(Value::as_str) == Some("offload") { "offloading" } else { "restoring" };
             return am_err(format!("{slug} is already {doing}; wait for it to finish"));
         }
@@ -74,11 +72,11 @@ pub fn begin_project_job(slug: &str, kind: &str, unarchive: bool) -> Result<()> 
     Ok(())
 }
 
-/// Port of `storage.run_project_job`: do the job begin_project_job claimed. A failure is
-/// kept for the page to show, and returned.
+/// Do the job begin_project_job claimed. A failure is kept for the page to show, and
+/// returned.
 pub fn run_project_job(slug: &str) -> Result<Value> {
-    let state = read_json(&state_path(slug))?.filter(|s| am_core::py::truthy(Some(s))).unwrap_or_else(util::empty);
-    let job = get(&state, "job").filter(|j| am_core::py::truthy(Some(j))).cloned().unwrap_or_else(util::empty);
+    let state = read_json(&state_path(slug))?.filter(|s| am_core::format::truthy(Some(s))).unwrap_or_else(util::empty);
+    let job = get(&state, "job").filter(|j| am_core::format::truthy(Some(j))).cloned().unwrap_or_else(util::empty);
     let kind = get(&job, "kind").and_then(Value::as_str).unwrap_or_default().to_string();
     let result = (|| -> Result<()> {
         match kind.as_str() {
@@ -107,7 +105,7 @@ pub fn run_project_job(slug: &str) -> Result<Value> {
     project_status(slug)
 }
 
-/// `storage._Progress`: the job's step in offload.json, at most once a second.
+/// The job's step in offload.json, at most once a second.
 struct Progress {
     slug: String,
     step: String,
@@ -138,7 +136,7 @@ impl Progress {
     }
 }
 
-/// `storage._step`.
+/// Set the job's step, with no progress yet.
 fn step(slug: &str, text: &str) -> Result<()> {
     update_json(&state_path(slug), util::empty(), |s| {
         if let Some(job) = util::fields(s).get_mut("job").filter(|j| j.is_object()) {
@@ -174,11 +172,12 @@ fn session_paths(info: &Value) -> Vec<String> {
         .collect()
 }
 
-/// `storage._offload_project`.
+/// Upload the project (unless an earlier run did), mark the stub, then remove the local
+/// copy and the session files.
 fn offload_now(slug: &str) -> Result<()> {
     let root = project_dir(slug);
     let mut info = offloaded_info(slug)?;
-    if !am_core::py::truthy(Some(&info)) {
+    if !am_core::format::truthy(Some(&info)) {
         info = upload(slug)?;
         // The stub is marked before anything is deleted, so a crash after this point leaves an
         // offloaded project with leftovers, which a rerun finishes removing.
@@ -199,9 +198,9 @@ fn offload_now(slug: &str) -> Result<()> {
     Ok(())
 }
 
-/// Port of `storage.json_bytes`: `json.dumps(data, indent=1) + "\n"`, ASCII-only.
+/// `data` as JSON with one-space indentation, ASCII-only, and a trailing newline.
 pub fn json_bytes(data: &Value) -> Vec<u8> {
-    (am_core::json::dumps_with(data, Some(1), true) + "\n").into_bytes()
+    (am_core::json::encode_with(data, Some(1), true) + "\n").into_bytes()
 }
 
 /// Everything written to rclone's stdin, hashed and counted on the way.
@@ -229,8 +228,8 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// `tar.add(path, arcname)`: the entry itself, then a directory's children in name order,
-/// symlinks stored as links. `count` sees each regular file's size.
+/// Add `path` to the archive as `arcname`: the entry itself, then a directory's children in
+/// name order, symlinks stored as links. `count` sees each regular file's size.
 fn add_tree<W: Write>(tar: &mut tar::Builder<W>, path: &Path, arcname: &str, count: &mut dyn FnMut(u64)) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(path)?;
     tar.append_path_with_name(path, arcname)?;
@@ -248,7 +247,7 @@ fn add_tree<W: Write>(tar: &mut tar::Builder<W>, path: &Path, arcname: &str, cou
     Ok(())
 }
 
-/// `storage._upload`: stream the archive to the remote and check it there.
+/// Stream the archive to the remote and check it there.
 fn upload(slug: &str) -> Result<Value> {
     let plan = project_plan(slug)?;
     let sessions = session_files(slug)?;
@@ -345,8 +344,7 @@ fn upload(slug: &str) -> Result<Value> {
     }))
 }
 
-/// `storage._remote_md5`: the remote's MD5 of a file; remotes that keep none are hashed by
-/// downloading.
+/// The remote's MD5 of a file; remotes that keep none are hashed by downloading.
 fn remote_md5(target: &str) -> Result<String> {
     for extra in [None, Some("--download")] {
         let mut args = vec!["md5sum"];
@@ -361,7 +359,7 @@ fn remote_md5(target: &str) -> Result<String> {
     Ok(String::new())
 }
 
-/// `shutil.move`: a rename, or a copy and delete across devices.
+/// Move a path: a rename, or a copy and delete across devices.
 fn move_path(source: &Path, dest: &Path) -> Result<()> {
     if std::fs::rename(source, dest).is_ok() {
         return Ok(());
@@ -373,11 +371,11 @@ fn move_path(source: &Path, dest: &Path) -> Result<()> {
     remove(source)
 }
 
-/// `storage._restore_project`.
+/// Download the archive into a staging directory, then put everything back.
 fn restore_now(slug: &str) -> Result<()> {
     let root = project_dir(slug);
     let info = offloaded_info(slug)?;
-    if !am_core::py::truthy(Some(&info)) {
+    if !am_core::format::truthy(Some(&info)) {
         return Ok(()); // Already back.
     }
     let staging = projects_dir().join(format!(".restore-{slug}"));
@@ -433,8 +431,7 @@ impl<R: Read> Read for Reading<R> {
     }
 }
 
-/// `storage._download`: unpack the archive into `staging`, checking every path and the
-/// SHA-256.
+/// Unpack the archive into `staging`, checking every path and the SHA-256.
 fn download(slug: &str, info: &Value, staging: &Path) -> Result<()> {
     if am_store::setup::which("rclone").is_none() {
         return am_err("rclone is not installed; on a Mac run `brew install rclone`");
@@ -462,7 +459,7 @@ fn download(slug: &str, info: &Value, staging: &Path) -> Result<()> {
             let name = entry.path().map_err(|e| e.to_string())?.to_string_lossy().into_owned();
             let top = name.split('/').next().unwrap_or_default();
             if !["manifest.json", "project", "home"].contains(&top) || name.starts_with('/') || name.split('/').any(|p| p == "..") {
-                return Err(format!("the backup holds an unexpected path {}", am_core::py::repr(&name)));
+                return Err(format!("the backup holds an unexpected path {}", am_core::format::quote(&name)));
             }
             let mode = entry.header().mode().unwrap_or(0o644);
             let mtime = entry.header().mtime().unwrap_or(0);
@@ -472,7 +469,7 @@ fn download(slug: &str, info: &Value, staging: &Path) -> Result<()> {
             let dest = staging.join(name.trim_end_matches('/'));
             if !kind_is_link {
                 use std::os::unix::fs::PermissionsExt;
-                // tarfile's "tar" filter: no high bits, and no group or other write.
+                // No setuid, setgid or sticky bits, and no group or other write.
                 let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode & 0o755));
             }
             if is_dir {
@@ -509,13 +506,13 @@ fn download(slug: &str, info: &Value, staging: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Port of `storage.offload_project`.
+/// Claim and run an offload of the project.
 pub fn offload_project(slug: &str) -> Result<Value> {
     begin_project_job(slug, "offload", false)?;
     run_project_job(slug)
 }
 
-/// Port of `storage.restore_project`.
+/// Claim and run a restore of the project, unarchiving it after if `unarchive`.
 pub fn restore_project(slug: &str, unarchive: bool) -> Result<Value> {
     begin_project_job(slug, "restore", unarchive)?;
     run_project_job(slug)

@@ -7,7 +7,7 @@
 //! `daemon/lock` (flock) for its whole life, so two can't run on one home at once.
 
 use crate::event::Event;
-use am_core::{am_err, am_home, awake_time, daemon_dir, hooks, log, now, py, read_json, write_json, Error, Result, Value};
+use am_core::{am_err, am_home, awake_time, daemon_dir, hooks, log, now, format, read_json, write_json, Error, Result, Value};
 use regex::Regex;
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -36,7 +36,7 @@ pub fn stop_wait_seconds() -> f64 {
     hooks::f64_or("stop_wait_seconds", STOP_WAIT_SECONDS)
 }
 
-/// Port of `daemon.web_token`.
+/// The UI's access token; with `create`, one is made if there's none.
 pub fn web_token(create: bool) -> Result<String> {
     am_core::token::web_token(create)
 }
@@ -49,7 +49,7 @@ fn try_flock(file: &File) -> bool {
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
-/// `open(daemon_dir() / "lock", "a")`: created if the daemon directory exists.
+/// The lock file, opened for appending: created if the daemon directory exists.
 fn open_lock() -> std::io::Result<File> {
     OpenOptions::new().append(true).create(true).open(lock_path())
 }
@@ -61,9 +61,10 @@ fn lock_is_held() -> bool {
     }
 }
 
-/// Python's `int(text)` for a pid file: surrounding whitespace, a sign, digits.
-fn py_int(text: &str) -> Option<i64> {
-    let text = py::strip(text);
+/// A pid file's integer: surrounding whitespace, a sign, then digits, which single
+/// underscores may separate.
+fn parse_pid(text: &str) -> Option<i64> {
+    let text = format::strip(text);
     let (sign, digits) = match text.strip_prefix('-') {
         Some(rest) => (-1, rest),
         None => (1, text.strip_prefix('+').unwrap_or(text)),
@@ -82,8 +83,6 @@ fn wall_time() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64()
 }
 
-/// Port of `daemon.running_pid`.
-///
 /// The daemon's pid, or None if it isn't running. It holds a flock on `lock` for as long
 /// as it lives, and writes its pid the moment it has it, so this is right all the way
 /// through startup and shutdown.
@@ -94,7 +93,7 @@ pub fn running_pid() -> Result<Option<i64>> {
     let deadline = wall_time() + 2.0;
     loop {
         if let Ok(text) = fs::read_to_string(daemon_dir().join("pid")) {
-            if let Some(pid) = py_int(&text) {
+            if let Some(pid) = parse_pid(&text) {
                 if pid > 1 {
                     return Ok(Some(pid));
                 }
@@ -107,8 +106,8 @@ pub fn running_pid() -> Result<Option<i64>> {
     }
 }
 
-/// `subprocess.run(argv, capture_output=True, text=True, timeout=seconds).stdout`, or None
-/// if it couldn't run or ran out of time.
+/// Run `argv` and return what it wrote to stdout, or None if it couldn't run or took
+/// longer than `seconds`.
 pub(crate) fn output_within(argv: &[&str], seconds: f64) -> Option<String> {
     let mut child = Command::new(argv[0]).args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     let mut stdout = child.stdout.take()?;
@@ -167,8 +166,6 @@ fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-/// Port of `daemon.public_host`.
-///
 /// The only hostname the UI answers to, or None to answer to any.
 ///
 /// Cookies don't isolate ports, so one set for 127.0.0.1 would also be sent to every other
@@ -196,16 +193,17 @@ fn gethostname() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
-/// Port of `daemon.base_url`.
+/// The UI's address, `http://host:port`, from the running daemon's `web.json` or else
+/// the config.
 pub fn base_url(cfg: Option<&Value>) -> Result<String> {
-    let info = read_json(&daemon_dir().join("web.json"))?.filter(|v| py::truthy(Some(v)));
+    let info = read_json(&daemon_dir().join("web.json"))?.filter(|v| format::truthy(Some(v)));
     let cfg = loaded(cfg)?;
-    let from_info = |key: &str| info.as_ref().and_then(|i| i.get(key)).filter(|v| py::truthy(Some(v))).cloned();
+    let from_info = |key: &str| info.as_ref().and_then(|i| i.get(key)).filter(|v| format::truthy(Some(v))).cloned();
     let mut host = match public_host(Some(&cfg))? {
         Some(host) => host,
-        None => py::str_of(Some(&from_info("host").unwrap_or_else(|| cfg["web"]["host"].clone())))?,
+        None => format::text_of(Some(&from_info("host").unwrap_or_else(|| cfg["web"]["host"].clone())))?,
     };
-    let port = py::str_of(Some(&from_info("port").unwrap_or_else(|| cfg["web"]["port"].clone())))?;
+    let port = format::text_of(Some(&from_info("port").unwrap_or_else(|| cfg["web"]["port"].clone())))?;
     if host == "0.0.0.0" || host == "::" {
         host = gethostname();
     }
@@ -215,22 +213,15 @@ pub fn base_url(cfg: Option<&Value>) -> Result<String> {
     Ok(format!("http://{host}:{port}"))
 }
 
-/// Port of `daemon.url_with_token`.
+/// The UI's address with the token that signs in.
 pub fn url_with_token() -> Result<String> {
     Ok(format!("{}/?token={}", base_url(None)?, web_token(false)?))
-}
-
-/// Python's `str(float)`, for the lock wait handed to a replacement daemon.
-fn float_str(x: f64) -> String {
-    py::float_repr(x)
 }
 
 fn exit_code(status: std::process::ExitStatus) -> i32 {
     status.code().unwrap_or_else(|| -status.signal().unwrap_or(0))
 }
 
-/// Port of `daemon.start`.
-///
 /// Start the daemon, unless one is running, and return its pid. `replacing` is a
 /// daemon that was asked to stop and may still be exiting: the new one waits for it.
 pub fn start(timeout: Option<f64>, replacing: Option<i64>) -> Result<i64> {
@@ -252,9 +243,9 @@ pub fn start(timeout: Option<f64>, replacing: Option<i64>) -> Result<i64> {
     let mut command = Command::new(exe.canonicalize().unwrap_or(exe));
     command.args(["daemon", "__run"]).stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out).env("AM_HOME", am_home());
     if replacing.is_some_and(|pid| pid != 0) {
-        command.env("AM_DAEMON_LOCK_WAIT", float_str(timeout));
+        command.env("AM_DAEMON_LOCK_WAIT", format::float_text(timeout));
     }
-    // start_new_session=True
+    // In a new session, apart from the caller's.
     unsafe {
         command.pre_exec(|| {
             libc::setsid();
@@ -292,7 +283,7 @@ fn released(timeout: f64) -> bool {
     }
 }
 
-/// `os.kill`, never to a process group or init: a pid of 1 or less is refused.
+/// Send a signal, never to a process group or init: a pid of 1 or less is refused.
 fn kill(pid: i64, signal: libc::c_int) -> Result<()> {
     if pid <= 1 {
         return Err(Error::Other(format!("refusing to signal pid {pid}")));
@@ -306,8 +297,6 @@ fn kill(pid: i64, signal: libc::c_int) -> Result<()> {
     Ok(())
 }
 
-/// Port of `daemon.stop`.
-///
 /// Stop the daemon. It's asked to, and waited for while it exits, for `timeout` seconds
 /// the machine is awake, so sleep doesn't use the wait up. If it's still there then, it's
 /// killed: turns are detached, so that interrupts none of them, and the next daemon
@@ -332,8 +321,6 @@ pub fn stop(timeout: Option<f64>) -> Result<bool> {
     am_err(format!("the daemon (pid {pid}) didn't stop within {timeout:.0}s, or when killed"))
 }
 
-/// Port of `daemon.restart`.
-///
 /// Replace the daemon, and return the new one's pid. Once the old daemon has been asked
 /// to stop, a new one is always started, so a slow exit never leaves none running.
 pub fn restart(timeout: Option<f64>) -> Result<i64> {
@@ -366,8 +353,8 @@ pub fn restart(timeout: Option<f64>) -> Result<i64> {
     }
 }
 
-/// `cli.cmd_daemon`'s output for each action, so the CLI can call it as it is. (The
-/// `_require_setup` check is the CLI's.)
+/// `am daemon <action>`, with its output, so the CLI can call it as it is. (Checking
+/// that setup is done is the CLI's job.)
 pub fn cmd_daemon(action: &str) -> Result<()> {
     match action {
         "start" => {
@@ -390,7 +377,7 @@ pub fn cmd_daemon(action: &str) -> Result<()> {
     Ok(())
 }
 
-/// `cli.cmd_url`'s output.
+/// `am url`, with its output.
 pub fn cmd_url() -> Result<()> {
     println!("{}", url_with_token()?);
     if running_pid()?.is_none() {
@@ -407,7 +394,7 @@ struct Recheck {
     fixed: BTreeSet<String>,
 }
 
-/// Port of `daemon.Daemon`: the shared state of the daemon's loops and its web server.
+/// The shared state of the daemon's loops and its web server.
 pub struct Daemon {
     lock: Option<File>,
     pub cfg: Value,
@@ -433,8 +420,8 @@ pub(crate) fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// Run `f`, turning a panic into an error, as Python turns any exception in a tick into
-/// a logged one.
+/// Run `f`, turning a panic into an error, so a panic in a tick is logged like any other
+/// failure.
 pub(crate) fn caught<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(result) => result,
@@ -458,7 +445,7 @@ impl Daemon {
         })
     }
 
-    /// The runner's current config (`self.runner.cfg`).
+    /// The runner's current config.
     pub fn runner_cfg(&self) -> Value {
         self.runner_cfg.lock().unwrap().clone()
     }
@@ -650,7 +637,7 @@ impl Daemon {
         }))
     }
 
-    /// Port of `daemon.Daemon.run`.
+    /// Serve the UI and run the loops until asked to stop.
     pub async fn run(self: Arc<Self>) -> Result<()> {
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
@@ -678,8 +665,8 @@ impl Daemon {
         ];
         self.stop_event.wait().await;
         log::info(LOG, "stopping; running turns continue");
-        // A tick in progress finishes, as Python's executor threads do: the next daemon
-        // mustn't start while one is half done. Health checks aren't waited for.
+        // A tick in progress finishes: the next daemon mustn't start while one is half
+        // done. Health checks aren't waited for.
         let (runner, scheduler, health) = {
             let [a, b, c] = loops;
             (a, b, c)
@@ -701,8 +688,8 @@ impl Daemon {
     }
 }
 
-/// Python logs every failed tick with its traceback. A port in progress fails the same way
-/// on every tick, so the same message is logged once.
+/// Log a failed tick. A tick that fails tends to fail the same way every time, so each
+/// message is logged only once.
 fn log_once(what: &str, error: &dyn std::fmt::Display) {
     static SEEN: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
     let text = format!("{what}: {error}");
@@ -711,9 +698,8 @@ fn log_once(what: &str, error: &dyn std::fmt::Display) {
     }
 }
 
-/// `Daemon._off_loop`: run `f` on a thread of its own that the daemon's exit doesn't wait
-/// for. For health checks: a login check can take its whole timeout, and a stop has no need
-/// to wait for one.
+/// Run `f` on a thread of its own that the daemon's exit doesn't wait for. For health
+/// checks: a login check can take its whole timeout, and a stop has no need to wait for one.
 pub(crate) async fn off_loop<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     let (send, receive) = tokio::sync::oneshot::channel();
     std::thread::Builder::new()
@@ -730,7 +716,7 @@ pub(crate) async fn off_loop<T: Send + 'static>(f: impl FnOnce() -> Result<T> + 
 fn take_lock() -> Result<File> {
     fs::create_dir_all(daemon_dir())?;
     let lock = open_lock()?;
-    let wait = std::env::var("AM_DAEMON_LOCK_WAIT").ok().filter(|s| !s.is_empty()).and_then(|s| py::strip(&s).parse::<f64>().ok());
+    let wait = std::env::var("AM_DAEMON_LOCK_WAIT").ok().filter(|s| !s.is_empty()).and_then(|s| format::strip(&s).parse::<f64>().ok());
     let deadline = awake_time() + wait.unwrap_or(LOCK_WAIT_SECONDS);
     loop {
         if try_flock(&lock) {
@@ -767,7 +753,7 @@ fn quiet_panics() {
     std::panic::set_hook(Box::new(|_| {}));
 }
 
-/// Port of `daemon.main`: the daemon process, `am daemon __run`.
+/// The daemon process, `am daemon __run`.
 pub fn main() -> Result<()> {
     log::configure();
     quiet_panics();
@@ -795,14 +781,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pid_files_parse_as_python_int_does() {
-        assert_eq!(py_int(" 123\n"), Some(123));
-        assert_eq!(py_int("-1"), Some(-1));
-        assert_eq!(py_int("+7"), Some(7));
-        assert_eq!(py_int("1_000"), Some(1000));
-        assert_eq!(py_int(""), None);
-        assert_eq!(py_int("garbage"), None);
-        assert_eq!(py_int("1__0"), None);
+    fn pid_files_parse_as_integers() {
+        assert_eq!(parse_pid(" 123\n"), Some(123));
+        assert_eq!(parse_pid("-1"), Some(-1));
+        assert_eq!(parse_pid("+7"), Some(7));
+        assert_eq!(parse_pid("1_000"), Some(1000));
+        assert_eq!(parse_pid(""), None);
+        assert_eq!(parse_pid("garbage"), None);
+        assert_eq!(parse_pid("1__0"), None);
     }
 
     #[test]

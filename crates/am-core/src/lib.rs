@@ -1,11 +1,11 @@
-//! The base every other crate builds on: `am.core` and `am.config`.
+//! The base every other crate builds on: paths, ids, clocks, the file protocol, value and
+//! JSON formatting, and config.
 //!
-//! The file protocol is the contract with the Python implementation and with live data:
-//! every write is an atomic rename, read-modify-write goes through a flock lock file, and a
-//! mailbox is one file per message. JSON is written exactly as Python's
-//! `json.dumps(obj, indent=1, ensure_ascii=False) + "\n"` writes it, and records stay
-//! `serde_json::Value` with their key order, so a read-modify-write never drops or reorders
-//! a key.
+//! The file protocol is the contract with live data: every write is an atomic rename,
+//! read-modify-write goes through a flock lock file, and a mailbox is one file per message.
+//! Records are written as `json::encode` writes them (one-space indentation, non-ASCII
+//! kept as it is, a trailing newline), and stay `serde_json::Value` with their key order,
+//! so a read-modify-write never drops or reorders a key.
 
 pub mod assets;
 pub mod clock;
@@ -16,7 +16,7 @@ pub mod ids;
 pub mod json;
 pub mod log;
 pub mod paths;
-pub mod py;
+pub mod format;
 pub mod text;
 pub mod token;
 
@@ -27,9 +27,8 @@ pub use paths::*;
 pub use serde_json::Value;
 pub use text::{excerpt, first_line};
 
-/// An error. `Am` is Python's `AmError`: a message for whoever runs `am`, printed as
-/// `am: <message>` with exit status 1. The rest are failures Python would raise as an
-/// uncaught exception.
+/// An error. `Am` is a message for whoever runs `am`, printed as `am: <message>` with exit
+/// status 1. The rest are unexpected failures.
 #[derive(Debug)]
 pub enum Error {
     Am(String),
@@ -64,7 +63,7 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-/// `raise AmError(msg)`.
+/// Fail with a message for whoever runs `am`.
 pub fn am_err<T>(msg: impl Into<String>) -> Result<T> {
     Err(Error::Am(msg.into()))
 }

@@ -1,4 +1,4 @@
-//! `asyncio.Event` for tokio: a flag that stays set until cleared, and wakes every waiter.
+//! An event for tokio: a flag that stays set until cleared, and wakes every waiter.
 //! The daemon's loops depend on its exact semantics: a loop clears its event before it
 //! works, so a set during the work brings on another round at once.
 
@@ -42,8 +42,7 @@ impl Event {
         }
     }
 
-    /// `asyncio.wait_for(event.wait(), seconds)` with the timeout suppressed: true if it
-    /// was set.
+    /// Wait up to `seconds` for the event: true if it was set, false if the time ran out.
     pub async fn wait_for(&self, seconds: f64) -> bool {
         let seconds = if seconds.is_finite() && seconds > 0.0 { seconds } else { 0.0 };
         tokio::time::timeout(Duration::from_secs_f64(seconds), self.wait()).await.is_ok()
