@@ -1,0 +1,19 @@
+[package]
+name = "am-turns"
+description = "prompts, backends, the turn and proc supervisors, procs, runner, costfix, scheduler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+am-core.workspace = true
+am-store.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+uuid.workspace = true
+regex.workspace = true
+sha2.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

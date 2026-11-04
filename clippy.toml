@@ -1,0 +1,7 @@
+# With serde_json's preserve_order, Map::remove is swap_remove: it moves the last key into
+# the removed one's place, so a rewritten file's key order differs from Python's. Python's
+# dict.pop keeps the order: use shift_remove.
+disallowed-methods = [
+    { path = "serde_json::Map::remove", reason = "reorders keys under preserve_order; use shift_remove, as Python's dict.pop keeps order" },
+    { path = "serde_json::Map::remove_entry", reason = "reorders keys under preserve_order; use shift_remove_entry" },
+]

@@ -1,0 +1,20 @@
+[package]
+name = "am"
+description = "Agent Mgr: the `am` binary (CLI, daemon and supervisors)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "am"
+path = "src/main.rs"
+
+[dependencies]
+am-core.workspace = true
+am-store.workspace = true
+am-turns.workspace = true
+am-ops.workspace = true
+am-server.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+regex.workspace = true

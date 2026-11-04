@@ -1,0 +1,23 @@
+[package]
+name = "am-server"
+description = "the daemon's lifecycle and the web server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+am-core.workspace = true
+am-store.workspace = true
+am-turns.workspace = true
+am-ops.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+regex.workspace = true
+libc.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

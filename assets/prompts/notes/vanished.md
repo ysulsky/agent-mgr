@@ -1,0 +1,1 @@
+Your previous turn ({turn_id}) stopped unexpectedly when its process vanished, probably in a machine restart. Check what you already started before continuing, and don't repeat work that is done or still running.

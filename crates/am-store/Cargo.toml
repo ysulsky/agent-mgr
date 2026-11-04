@@ -1,0 +1,16 @@
+[package]
+name = "am-store"
+description = "projects, mail, items, gitstore, memory, artifacts, setup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+am-core.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+regex.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

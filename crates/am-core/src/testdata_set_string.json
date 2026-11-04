@@ -1,0 +1,51 @@
+[
+ [
+  "[storage]\nrclone_remote = \"\"  # comment\nfolder = \"x\"\n",
+  "storage",
+  "rclone_remote",
+  "gdrive",
+  "[storage]\nrclone_remote = \"gdrive\"  # comment\nfolder = \"x\"\n"
+ ],
+ [
+  "[storage]\nfolder = \"x\"\n\n[logins]\ngh = false\n",
+  "storage",
+  "rclone_remote",
+  "gdrive",
+  "[storage]\nrclone_remote = \"gdrive\"\nfolder = \"x\"\n\n[logins]\ngh = false\n"
+ ],
+ [
+  "[web]\nport = 1\n",
+  "storage",
+  "rclone_remote",
+  "gdrive",
+  "[web]\nport = 1\n\n[storage]\nrclone_remote = \"gdrive\"\n"
+ ],
+ [
+  "[web]\nport = 1",
+  "storage",
+  "rclone_remote",
+  "gd\"rive é",
+  "[web]\nport = 1\n\n[storage]\nrclone_remote = \"gd\\\"rive \\u00e9\"\n"
+ ],
+ [
+  "[storage] # tbl\n  rclone_remote='old'\n",
+  "storage",
+  "rclone_remote",
+  "new",
+  "[storage] # tbl\n  rclone_remote=\"new\"\n"
+ ],
+ [
+  "[storage]\nrclone_remote = bare\n",
+  "storage",
+  "rclone_remote",
+  "new",
+  "[storage]\nrclone_remote = \"new\"\n"
+ ],
+ [
+  "",
+  "storage",
+  "rclone_remote",
+  "new",
+  "\n[storage]\nrclone_remote = \"new\"\n"
+ ]
+]

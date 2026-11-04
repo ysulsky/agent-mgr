@@ -1,0 +1,65 @@
+{
+    "web": {
+        "host": "127.0.0.1",
+        "port": 8737,
+        "public_host": ""
+    },
+    "defaults": {
+        "manager_backend": "claude",
+        "manager_model": "",
+        "worker_backend": "claude",
+        "worker_model": "",
+        "health_every": "2h"
+    },
+    "backends": {
+        "claude": {
+            "bin": "claude",
+            "permission_mode": "auto",
+            "allowed_tools": [
+                "Bash(am *)"
+            ],
+            "models": [
+                "fable",
+                "opus",
+                "sonnet",
+                "haiku"
+            ],
+            "extra_args": []
+        },
+        "codex": {
+            "bin": "codex",
+            "sandbox": "workspace-write",
+            "network": true,
+            "models": [],
+            "extra_args": []
+        }
+    },
+    "pricing": {},
+    "runner": {
+        "tick_seconds": 0.3,
+        "max_retries": 3,
+        "stop_grace_seconds": 10,
+        "stuck_after": "30m",
+        "manager_turn_limit": "20m",
+        "worker_turn_limit": "6h",
+        "auto_interrupt_after": "3s",
+        "persistent": true,
+        "process_idle": "55m",
+        "max_live_processes": 6
+    },
+    "health": {
+        "check_every": "5m",
+        "login_check_every": "30m",
+        "alert_cooldown": "6h",
+        "disk_warn_percent": 90,
+        "memory_warn_percent": 92
+    },
+    "storage": {
+        "rclone_remote": "",
+        "folder": "agent-mgr"
+    },
+    "logins": {
+        "gh": false,
+        "extra": []
+    }
+}

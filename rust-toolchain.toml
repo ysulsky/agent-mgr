@@ -1,0 +1,4 @@
+[toolchain]
+# The workspace needs Rust 1.90 or later.
+channel = "1.90.0"
+components = ["clippy", "rustfmt"]

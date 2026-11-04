@@ -1,0 +1,83 @@
+# Agent Mgr configuration. `am setup` never overwrites this file.
+
+[web]
+host = "127.0.0.1"   # Only this machine can reach the UI. Change it with care.
+port = 8737
+# The hostname the UI answers to. Empty means a private name under .localhost, or, with a
+# non-loopback host above, any name. Set it if you reach the UI through a proxy.
+public_host = ""
+
+[defaults]
+# Backends are "claude" or "codex". An empty model means the CLI's own default.
+# Projects and individual agents can override these.
+manager_backend = "claude"
+manager_model = ""
+worker_backend = "claude"
+worker_model = ""
+health_every = "2h"
+
+# Turns run non-interactively, so nobody can answer a permission prompt: what a
+# turn may do is decided here, up front.
+[backends.claude]
+bin = "claude"
+# "auto" has Claude Code's safety checks review each action. "acceptEdits" and
+# "dontAsk" are stricter. "bypassPermissions" removes every check, so only use it
+# on a machine you are happy for agents to do anything on.
+permission_mode = "auto"
+allowed_tools = ["Bash(am *)"]
+models = ["fable", "opus", "sonnet", "haiku"]
+extra_args = []
+
+[backends.codex]
+bin = "codex"
+# "workspace-write" lets a turn write only inside the project and AM_HOME.
+# "danger-full-access" removes the sandbox, with the same warning as above.
+sandbox = "workspace-write"
+network = true
+models = []
+extra_args = []
+
+# Codex reports tokens but not cost. Add USD per million tokens to estimate it:
+# [pricing."gpt-5.5"]
+# input = 5.0
+# cached_input = 0.5
+# output = 15.0
+
+[runner]
+max_retries = 3
+stop_grace_seconds = 10
+stuck_after = "30m"
+# A turn running longer than this is stopped, and the agent is told why at the start of
+# its next turn. Timed from when the agent's process starts. "0" turns the limit off.
+manager_turn_limit = "20m"
+worker_turn_limit = "6h"
+# A message from the user to a manager busy with a turn the user didn't start (a report,
+# a schedule, a health check) interrupts that turn after this long, and the turn's own
+# messages are delivered again with the user's. "off" makes the user's message wait.
+auto_interrupt_after = "3s"
+# A claude agent keeps one process between turns, so a turn skips the CLI's start and
+# its instructions are sent once. It stops after process_idle with no turn (the prompt
+# cache lasts an hour), and at most max_live_processes stay up, about 300 MB each: the
+# least recently used idle one goes first. persistent = false starts one per turn.
+persistent = true
+process_idle = "55m"
+max_live_processes = 6
+
+[health]
+check_every = "5m"
+login_check_every = "30m"
+alert_cooldown = "6h"
+disk_warn_percent = 90
+memory_warn_percent = 92
+
+[storage]
+# `am storage offload` copies to this rclone remote. For Google Drive, use Connect Google
+# Drive in the home project's Settings, which logs in and sets rclone_remote = "gdrive".
+rclone_remote = ""
+folder = "agent-mgr"
+
+[logins]
+# Logins checked besides claude, codex and the storage remote.
+gh = false
+# The Health page offers `fix` when the check fails, and `missing_fix` when its tool isn't installed.
+# extra = [{ name = "gcloud", check = "gcloud auth print-access-token", fix = "gcloud auth login", missing_fix = "brew install gcloud-cli" }]

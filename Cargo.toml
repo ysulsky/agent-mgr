@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["crates/am-core", "crates/am-store", "crates/am-turns", "crates/am-ops", "crates/am-server", "crates/am"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "MIT"
+
+# Every third-party crate, pinned here once. A crate opts in with `name.workspace = true`.
+[workspace.dependencies]
+am-core = { path = "crates/am-core" }
+am-store = { path = "crates/am-store" }
+am-turns = { path = "crates/am-turns" }
+am-ops = { path = "crates/am-ops" }
+am-server = { path = "crates/am-server" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+toml = { version = "0.8", default-features = false, features = ["parse", "preserve_order"] }
+regex = "1"
+libc = "0.2"
+nix = { version = "0.29", features = ["fs", "ioctl", "process", "signal", "term"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+uuid = { version = "1", features = ["v4", "v5"] }
+getrandom = "0.2"
+sha2 = "0.10"
+hmac = "0.12"
+md-5 = "0.10"
+base64 = "0.22"
+tar = "0.4"
+flate2 = "1"
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
