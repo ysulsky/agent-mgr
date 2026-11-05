@@ -4,6 +4,35 @@ Agent Mgr runs a hierarchy of agents. You talk to a home manager, the home manag
 
 Agent Mgr is a single Rust binary, `am`: the CLI, the daemon and the turn supervisors.
 
+## Screenshots
+
+The projects, agents and data in these are mock ones.
+
+**Home.** Every project, what needs you, the tasks and agents across projects, and the health dot.
+
+![The home page: projects in the sidebar, the home manager's answer, and the attention, task and agent cards](docs/screenshots/home-overview.png)
+
+**A project's chat.** The manager updated its answer to v3 when the results came in, with a chart inline.
+
+![A project chat with an answer card marked "Updated · v3" and an inline chart](docs/screenshots/project-chat-updated-answer.png)
+
+**Artifacts.** A report opens in a panel docked beside the chat.
+
+![The artifact panel docked beside the chat, showing a Markdown report](docs/screenshots/artifact-panel-docked.png)
+
+**Health.** Logins, disk and memory, and each project's health check.
+
+![The Health page with all logins OK](docs/screenshots/health-page.png)
+
+<details>
+<summary>Dark mode and phone</summary>
+
+![The project chat in dark mode](docs/screenshots/project-chat-dark.png)
+
+<img src="docs/screenshots/phone-chat.png" alt="The project chat on a phone" width="390">
+
+</details>
+
 ## Getting started
 
 You need [Rust](https://rustup.rs) (the workspace pins 1.90 in `rust-toolchain.toml`, which rustup installs on first build), git, and at least one of `claude` and `codex`, logged in. Terminals in the UI need `tmux`, and storage offload needs `rclone`.
