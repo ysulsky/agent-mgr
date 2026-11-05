@@ -222,7 +222,7 @@ pub fn connect_command(provider: &str) -> Option<String> {
 /// changed.
 pub fn connected(provider: &str) -> Result<bool> {
     let Some((_, remote, _)) = PROVIDERS.iter().find(|(name, _, _)| *name == provider) else {
-        return util::crash(format!("KeyError: {}", util::quote(provider)));
+        return util::crash(format!("unknown storage provider {}", util::quote(provider)));
     };
     am_core::config::set_string("storage", "rclone_remote", remote)
 }

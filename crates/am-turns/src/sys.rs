@@ -98,12 +98,12 @@ pub fn new_session(cmd: &mut std::process::Command) {
     }
 }
 
-/// An OS error as the supervisors report it: `[Errno 2] No such file or directory: 'claude'`.
+/// An OS error as the supervisors report it: `No such file or directory: 'claude'`.
 pub fn os_error_text(e: &std::io::Error, filename: &str) -> String {
     match e.raw_os_error() {
         Some(errno) => {
             let msg = unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)) }.to_string_lossy().into_owned();
-            format!("[Errno {errno}] {msg}: {}", quote_filename(filename))
+            format!("{msg}: {}", quote_filename(filename))
         }
         None => e.to_string(),
     }
@@ -162,8 +162,8 @@ pub fn f64_field(spec: &Value, key: &str, default: f64) -> f64 {
 }
 
 /// Spawn `argv` in `cwd` in a session of its own, with the files given. A failure comes
-/// back as text: an `os_error_text` naming `cwd` or the program, or `list index out of
-/// range` for an empty `argv`.
+/// back as text: an `os_error_text` naming `cwd` or the program, or `empty command` for an
+/// empty `argv`.
 pub fn spawn(
     argv: &[String],
     cwd: &str,
@@ -172,7 +172,7 @@ pub fn spawn(
     stderr: fs::File,
 ) -> Result<std::process::Child, String> {
     let Some(program) = argv.first() else {
-        return Err("list index out of range".into());
+        return Err("empty command".into());
     };
     if !Path::new(cwd).is_dir() {
         let e = std::io::Error::from_raw_os_error(if Path::new(cwd).exists() { libc::ENOTDIR } else { libc::ENOENT });
@@ -191,6 +191,6 @@ mod tests {
     #[test]
     fn os_errors_name_the_errno_and_file() {
         let e = std::io::Error::from_raw_os_error(libc::ENOENT);
-        assert_eq!(os_error_text(&e, "claude"), "[Errno 2] No such file or directory: 'claude'");
+        assert_eq!(os_error_text(&e, "claude"), "No such file or directory: 'claude'");
     }
 }

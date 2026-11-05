@@ -115,7 +115,7 @@ impl GitStore {
             let parts: Vec<&str> = line.splitn(4, '\t').collect();
             if parts.len() == 4 {
                 let Some(ts) = am_core::format::parse_int(parts[1]) else {
-                    return util::crash(format!("invalid literal for int() with base 10: {}", util::quote(parts[1])));
+                    return util::crash(format!("not an integer: {}", util::quote(parts[1])));
                 };
                 entries.push(json!({"rev": parts[0], "ts": ts, "author": parts[2], "subject": parts[3]}));
             }

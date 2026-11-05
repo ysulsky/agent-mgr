@@ -259,7 +259,7 @@ fn handle_sync(app: &App, route: Route, req: &Req) -> Handled {
 }
 
 fn unexpected(req: &Req, error: &str) -> Resp {
-    log::error("aiohttp.server", &format!("Error handling request {} {}\n{error}", req.parts.method, req.parts.uri));
+    log::error("am.web", &format!("Error handling request {} {}\n{error}", req.parts.method, req.parts.uri));
     internal_error()
 }
 
@@ -279,7 +279,7 @@ async fn security(app: Arc<App>, req: Req, resolved: Resolved) -> Resp {
             Ok(resp) => resp,
             Err(Fail::Http(resp)) => *resp,
             Err(other) => {
-                log::error("aiohttp.server", &format!("Error handling request {summary}\n{}", fail_text(&other)));
+                log::error("am.web", &format!("Error handling request {summary}\n{}", fail_text(&other)));
                 internal_error()
             }
         };
@@ -303,7 +303,7 @@ async fn security(app: Arc<App>, req: Req, resolved: Resolved) -> Resp {
         Err(Fail::Am(message)) => Resp::json(400, &serde_json::json!({"error": message})),
         Err(Fail::BadJson) => Resp::json(400, &serde_json::json!({"error": "the request body isn't valid JSON"})),
         Err(Fail::Internal(e)) => {
-            log::error("aiohttp.server", &format!("Error handling request {summary}\n{e}"));
+            log::error("am.web", &format!("Error handling request {summary}\n{e}"));
             return internal_error();
         }
     };
@@ -381,8 +381,7 @@ pub async fn start_server(daemon: Arc<Daemon>) -> Result<Server> {
         Ok(listener) => listener,
         Err(e) => {
             return Err(am_core::Error::Other(format!(
-                "[Errno {}] error while attempting to bind on address ('{host}', {port}): {}",
-                e.raw_os_error().unwrap_or(0),
+                "can't listen on {host}:{port}: {}",
                 e.to_string().split(" (os error").next().unwrap_or("").to_lowercase()
             )))
         }

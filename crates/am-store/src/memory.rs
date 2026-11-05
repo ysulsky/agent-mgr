@@ -67,7 +67,7 @@ pub fn read(name: &str) -> Result<String> {
     match std::fs::read(&path) {
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(text) => Ok(text.replace("\r\n", "\n").replace('\r', "\n")),
-            Err(_) => util::crash(format!("'utf-8' codec can't decode {}", path.display())),
+            Err(_) => util::crash(format!("{} isn't valid UTF-8", path.display())),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing(),
         Err(e) => Err(e.into()),

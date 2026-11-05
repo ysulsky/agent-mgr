@@ -44,7 +44,7 @@ fn text_or_none(body: &Map<String, Value>, key: &str) -> Option<String> {
 
 /// `text` as an integer, or a 500.
 fn parse_int_or_fail(text: &str) -> Result<i64, Fail> {
-    format::parse_int(text).ok_or_else(|| Fail::Internal(format!("invalid literal for int() with base 10: {}", format::quote(text))))
+    format::parse_int(text).ok_or_else(|| Fail::Internal(format!("not an integer: {}", format::quote(text))))
 }
 
 /// A JSON value as an integer: a bool as 0 or 1, a number truncated, a string parsed;
@@ -54,7 +54,7 @@ fn int_of(v: &Value) -> Result<i64, Fail> {
         Value::Bool(b) => Ok(*b as i64),
         Value::Number(n) => Ok(n.as_i64().unwrap_or_else(|| n.as_f64().unwrap_or(0.0).trunc() as i64)),
         Value::String(s) => parse_int_or_fail(s),
-        other => Err(Fail::Internal(format!("int() argument must be a string or a number, not {}", format::literal(other)))),
+        other => Err(Fail::Internal(format!("not a number: {}", format::literal(other)))),
     }
 }
 
@@ -534,7 +534,7 @@ pub fn read_text(path: &std::path::Path) -> std::io::Result<Result<String, Fail>
     let bytes = std::fs::read(path)?;
     Ok(match String::from_utf8(bytes) {
         Ok(text) => Ok(text.replace("\r\n", "\n").replace('\r', "\n")),
-        Err(e) => Err(Fail::Internal(format!("'utf-8' codec can't decode {}", e))),
+        Err(e) => Err(Fail::Internal(format!("not valid UTF-8: {}", e))),
     })
 }
 

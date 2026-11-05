@@ -226,7 +226,7 @@ fn edit_in_editor(initial: &str) -> Result<String> {
     let status = std::process::Command::new(&editor).arg(&path).status();
     let result = match status {
         Ok(s) if s.success() => Ok(std::fs::read_to_string(&path)?),
-        Ok(s) => Err(am_core::Error::Other(format!("Command '['{editor}', '{}']' returned non-zero exit status {}.", path.display(), s.code().unwrap_or(-1)))),
+        Ok(s) => Err(am_core::Error::Other(format!("{editor} {} exited with status {}", path.display(), s.code().unwrap_or(-1)))),
         Err(e) => Err(e.into()),
     };
     let _ = std::fs::remove_file(&path);

@@ -228,7 +228,7 @@ fn version_numbers(directory: &Path) -> Result<Option<Vec<i64>>> {
             let inner = if n.len() >= 6 { &n[1..n.len() - 5] } else { "" };
             match am_core::format::parse_int(inner) {
                 Some(v) => out.push(v),
-                None => return util::crash(format!("invalid literal for int() with base 10: {}", util::quote(inner))),
+                None => return util::crash(format!("not an integer: {}", util::quote(inner))),
             }
         }
     }
@@ -328,7 +328,7 @@ fn find_in_project(item_id: &str, slug: &str) -> Result<Option<Value>> {
                 merged.insert(k, v);
             }
         } else {
-            return util::crash("'attention item' object is not a mapping");
+            return util::crash("an attention item isn't an object");
         }
         return Ok(Some(Value::Object(merged)));
     }
@@ -361,7 +361,7 @@ fn find_in_project(item_id: &str, slug: &str) -> Result<Option<Value>> {
             else {
                 return Ok(None);
             };
-            let Value::Object(fields) = answer.clone() else { return util::crash("'answer' object is not a mapping") };
+            let Value::Object(fields) = answer.clone() else { return util::crash("an answer isn't an object") };
             let mut merged = fields;
             merged.insert("type".into(), "answer".into());
             merged.insert("project".into(), slug.into());
@@ -389,20 +389,20 @@ fn sv(v: &Value, key: &str) -> String {
 fn text_field(v: &Value, key: &str) -> Result<String> {
     match get(v, key) {
         Some(Value::String(s)) => Ok(s.clone()),
-        Some(other) => util::crash(format!("sequence item: expected str instance, {} found", type_name(other))),
-        None => util::crash(format!("KeyError: {}", util::quote(key))),
+        Some(other) => util::crash(format!("{} is {}, not text", util::quote(key), type_name(other))),
+        None => util::crash(format!("{} is missing", util::quote(key))),
     }
 }
 
 fn type_name(v: &Value) -> &'static str {
     match v {
-        Value::Null => "NoneType",
-        Value::Bool(_) => "bool",
-        Value::Number(n) if n.is_f64() => "float",
-        Value::Number(_) => "int",
-        Value::String(_) => "str",
-        Value::Array(_) => "list",
-        Value::Object(_) => "dict",
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(n) if n.is_f64() => "a number",
+        Value::Number(_) => "an integer",
+        Value::String(_) => "text",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
     }
 }
 
@@ -484,7 +484,7 @@ pub fn render_item(item: &Value) -> Result<String> {
                 .find(|v| am_core::format::truthy(Some(v)))
                 .unwrap_or(&none);
             let Some(text) = text.as_str() else {
-                return util::crash(format!("can only concatenate str (not \"{}\") to str", type_name(text)));
+                return util::crash(format!("the reply is {}, not text", type_name(text)));
             };
             Ok(lines.join("\n") + "\n\n" + text + "\n")
         }

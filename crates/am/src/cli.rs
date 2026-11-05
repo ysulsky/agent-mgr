@@ -113,7 +113,7 @@ pub fn stdin_is_tty() -> bool {
 pub fn read_stdin() -> Result<String> {
     let mut bytes = Vec::new();
     std::io::stdin().read_to_end(&mut bytes)?;
-    String::from_utf8(bytes).map_err(|_| Error::Other("'utf-8' codec can't decode the standard input".into()))
+    String::from_utf8(bytes).map_err(|_| Error::Other("the standard input isn't valid UTF-8".into()))
 }
 
 /// A UTF-8 file, with `\r\n` and `\r` read as `\n`.
@@ -121,11 +121,11 @@ fn read_file(path: &str) -> Result<String> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(Error::Other(format!("[Errno 2] No such file or directory: {}", format::quote(path))))
+            return Err(Error::Other(format!("No such file or directory: {}", format::quote(path))))
         }
         Err(e) => return Err(e.into()),
     };
-    let text = String::from_utf8(bytes).map_err(|_| Error::Other(format!("'utf-8' codec can't decode {path}")))?;
+    let text = String::from_utf8(bytes).map_err(|_| Error::Other(format!("{path} isn't valid UTF-8")))?;
     Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
 }
 

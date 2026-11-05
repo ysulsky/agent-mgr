@@ -228,7 +228,7 @@ pub fn found(location: &str) -> Fail {
 
 /// What's sent for an error a handler didn't expect.
 pub fn internal_error() -> Resp {
-    Resp::new(500, "text/plain; charset=utf-8", "500 Internal Server Error\n\nServer got itself in trouble")
+    Resp::new(500, "text/plain; charset=utf-8", "500 Internal Server Error\n\nAn unexpected error; the daemon log has the details.")
 }
 
 // ---------------------------------------------------------------- paths and queries
